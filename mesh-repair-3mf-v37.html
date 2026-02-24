@@ -1,0 +1,3548 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3MF Mesh Repair v38</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 20px; background: #f5f5f5; }
+    h1 { color: #333; }
+    .panel { background: white; padding: 15px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    button { padding: 10px 20px; margin: 5px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 6px; }
+    button:hover { background: #0056b3; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-success { background: #28a745; }
+    .btn-danger { background: #dc3545; }
+    #log { background: #1e1e1e; color: #d4d4d4; padding: 15px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 11px; white-space: pre-wrap; border-radius: 4px; }
+    .info { color: #9cdcfe; }
+    .success { color: #6a9955; }
+    .error { color: #f44747; }
+    .warn { color: #dcdcaa; }
+    .progress { width: 100%; height: 10px; background: #ddd; border-radius: 5px; margin: 10px 0; }
+    .progress-bar { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); border-radius: 5px; transition: width 0.3s; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 10px 0; }
+    th, td { border: 1px solid #ddd; padding: 6px; text-align: center; }
+    th { background: #f0f0f0; }
+    .good { color: #28a745; font-weight: bold; }
+    .bad { color: #dc3545; font-weight: bold; }
+    #status { font-size: 14px; color: #333; margin: 10px 0; padding: 10px; background: #e9ecef; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>3MF Mesh Repair v38</h1>
+  <p style="color:#666;">MeshFixLib v3.2 - WASM対応 8段階修復パイプライン</p>
+
+  <div class="panel">
+    <input type="file" id="fileInput" accept=".3mf">
+    <div id="status" style="display:none;"></div>
+    <div class="progress" style="display:none;" id="progress">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div id="objectTable"></div>
+  </div>
+
+  <div class="panel">
+    <button id="repairBtn" disabled class="btn-success">修復</button>
+    <button id="cancelBtn" disabled class="btn-danger" style="display:none;">キャンセル</button>
+    <button id="downloadBtn" disabled>ダウンロード</button>
+  </div>
+
+  <div class="panel">
+    <div id="log"></div>
+  </div>
+
+<!-- Web Worker コード -->
+<script id="workerCode" type="text/worker">
+// ===== WASM モジュール =====
+var wasmModule = null;
+var wasmReady = false;
+
+// ===== ユーティリティ =====
+function vKey(v, precision) {
+  if (precision === undefined) precision = 6;
+  return v[0].toFixed(precision) + '_' + v[1].toFixed(precision) + '_' + v[2].toFixed(precision);
+}
+
+function windingKey(a, b, c) {
+  if (a <= b && a <= c) return a + ',' + b + ',' + c;
+  if (b <= a && b <= c) return b + ',' + c + ',' + a;
+  return c + ',' + a + ',' + b;
+}
+
+function unorderedKey(a, b, c) {
+  var x = a, y = b, z = c;
+  if (x > y) { var t = x; x = y; y = t; }
+  if (y > z) { var t = y; y = z; z = t; }
+  if (x > y) { var t = x; x = y; y = t; }
+  return x + ',' + y + ',' + z;
+}
+
+var repairDeadline = 0;
+
+function undirEdgeKey(a, b) {
+  return a < b ? a * 1000000 + b : b * 1000000 + a;
+}
+
+function computeNormal(V, a, b, c) {
+  var v0 = V[a], v1 = V[b], v2 = V[c];
+  var e1x = v1[0]-v0[0], e1y = v1[1]-v0[1], e1z = v1[2]-v0[2];
+  var e2x = v2[0]-v0[0], e2y = v2[1]-v0[1], e2z = v2[2]-v0[2];
+  var nx = e1y*e2z - e1z*e2y;
+  var ny = e1z*e2x - e1x*e2z;
+  var nz = e1x*e2y - e1y*e2x;
+  var len = Math.sqrt(nx*nx + ny*ny + nz*nz);
+  if (len < 1e-15) return [0, 0, 0];
+  return [nx/len, ny/len, nz/len];
+}
+
+// ===== 診断 =====
+function diagnose(V, T) {
+  var undirEdges = new Map();
+  for (var i = 0; i < T.length; i++) {
+    var a = T[i][0], b = T[i][1], c = T[i][2];
+    if (a === b || b === c || c === a) continue;
+    var e1 = undirEdgeKey(a, b);
+    var e2 = undirEdgeKey(b, c);
+    var e3 = undirEdgeKey(c, a);
+    undirEdges.set(e1, (undirEdges.get(e1) || 0) + 1);
+    undirEdges.set(e2, (undirEdges.get(e2) || 0) + 1);
+    undirEdges.set(e3, (undirEdges.get(e3) || 0) + 1);
+  }
+  var boundary = 0, nonManifold = 0;
+  for (var cnt of undirEdges.values()) {
+    if (cnt === 1) boundary++;
+    else if (cnt > 2 && cnt !== 4) nonManifold++;
+  }
+  // 反対巻き重複ペア検出
+  var triByUKey = new Map();
+  for (var i = 0; i < T.length; i++) {
+    var a = T[i][0], b = T[i][1], c = T[i][2];
+    if (a === b || b === c || c === a) continue;
+    var uk = unorderedKey(a, b, c);
+    if (!triByUKey.has(uk)) triByUKey.set(uk, []);
+    triByUKey.get(uk).push(i);
+  }
+  var oppositeWindingPairs = 0;
+  for (var entry of triByUKey) {
+    var tris = entry[1];
+    if (tris.length < 2) continue;
+    var windings = new Set();
+    for (var ti of tris) windings.add(windingKey(T[ti][0], T[ti][1], T[ti][2]));
+    if (windings.size >= 2) oppositeWindingPairs++;
+  }
+  // 巻き方向不整合エッジ数（manifoldエッジで同方向に横切る）
+  var windingInconsistencies = 0;
+  {
+    var wdInfo = new Map();
+    for (var i = 0; i < T.length; i++) {
+      var a = T[i][0], b = T[i][1], c = T[i][2];
+      if (a === b || b === c || c === a) continue;
+      var we = [[a, b], [b, c], [c, a]];
+      for (var e = 0; e < 3; e++) {
+        var u = we[e][0], v = we[e][1];
+        var wk = undirEdgeKey(u, v);
+        if (!wdInfo.has(wk)) wdInfo.set(wk, [0, 0]);
+        var wd = wdInfo.get(wk);
+        if (u < v) wd[0]++; else wd[1]++;
+      }
+    }
+    for (var wd of wdInfo.values()) {
+      if (wd[0] + wd[1] !== 2) continue;
+      if (wd[0] === 2 || wd[1] === 2) windingInconsistencies++;
+    }
+  }
+  var components = findConnectedComponents(T).length;
+  return { v: V.length, t: T.length, boundary: boundary, nonManifold: nonManifold, oppositeWindingPairs: oppositeWindingPairs, windingInconsistencies: windingInconsistencies, components: components, isWatertight: boundary === 0 && nonManifold === 0 };
+}
+
+// 軽量診断（NM + B のみ。WI/コンポーネント/OWP省略）
+function quickDiagnose(V, T) {
+  var undirEdges = new Map();
+  for (var i = 0; i < T.length; i++) {
+    var a = T[i][0], b = T[i][1], c = T[i][2];
+    if (a === b || b === c || c === a) continue;
+    var e1 = undirEdgeKey(a, b);
+    var e2 = undirEdgeKey(b, c);
+    var e3 = undirEdgeKey(c, a);
+    undirEdges.set(e1, (undirEdges.get(e1) || 0) + 1);
+    undirEdges.set(e2, (undirEdges.get(e2) || 0) + 1);
+    undirEdges.set(e3, (undirEdges.get(e3) || 0) + 1);
+  }
+  var boundary = 0, nonManifold = 0;
+  for (var cnt of undirEdges.values()) {
+    if (cnt === 1) boundary++;
+    else if (cnt > 2 && cnt !== 4) nonManifold++;
+  }
+  return { boundary: boundary, nonManifold: nonManifold, isWatertight: boundary === 0 && nonManifold === 0 };
+}
+
+// ===== Stage 0: 頂点マージ =====
+function mergeVertices(vertices, triangles) {
+  var vMap = new Map();
+  var newV = [];
+  var indexMap = new Array(vertices.length);
+  var merged = 0;
+  for (var i = 0; i < vertices.length; i++) {
+    var k = vKey(vertices[i]);
+    if (vMap.has(k)) {
+      indexMap[i] = vMap.get(k);
+      merged++;
+    } else {
+      indexMap[i] = newV.length;
+      vMap.set(k, newV.length);
+      newV.push(vertices[i]);
+    }
+  }
+  var newT = [];
+  for (var i = 0; i < triangles.length; i++) {
+    var t = triangles[i];
+    newT.push([indexMap[t[0]], indexMap[t[1]], indexMap[t[2]]]);
+  }
+  return { vertices: newV, triangles: newT, merged: merged };
+}
+
+// ===== Stage 1: 縮退三角形除去 =====
+function removeDegenerateTriangles(vertices, triangles, threshold) {
+  if (threshold === undefined) threshold = 1e-20;
+  var result = [];
+  var removed = 0;
+  for (var i = 0; i < triangles.length; i++) {
+    var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
+    if (a === b || b === c || c === a) { removed++; continue; }
+    var v0 = vertices[a], v1 = vertices[b], v2 = vertices[c];
+    var e1x = v1[0]-v0[0], e1y = v1[1]-v0[1], e1z = v1[2]-v0[2];
+    var e2x = v2[0]-v0[0], e2y = v2[1]-v0[1], e2z = v2[2]-v0[2];
+    var cx = e1y*e2z - e1z*e2y;
+    var cy = e1z*e2x - e1x*e2z;
+    var cz = e1x*e2y - e1y*e2x;
+    if (cx*cx + cy*cy + cz*cz < threshold) { removed++; continue; }
+    result.push([a, b, c]);
+  }
+  return { triangles: result, removed: removed };
+}
+
+// ===== 浮遊シェル除去 =====
+function findConnectedComponents(triangles) {
+  var n = triangles.length;
+  if (n === 0) return [];
+  var edgeMap = new Map();
+  for (var i = 0; i < n; i++) {
+    var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
+    var edges = [[a, b], [b, c], [c, a]];
+    for (var e = 0; e < 3; e++) {
+      var u = edges[e][0], v = edges[e][1];
+      var key = u < v ? u + ',' + v : v + ',' + u;
+      if (!edgeMap.has(key)) edgeMap.set(key, []);
+      edgeMap.get(key).push(i);
+    }
+  }
+  var visited = new Uint8Array(n);
+  var components = [];
+  for (var i = 0; i < n; i++) {
+    if (visited[i]) continue;
+    var component = [];
+    var queue = [i];
+    visited[i] = 1;
+    while (queue.length > 0) {
+      var ti = queue.pop();
+      component.push(ti);
+      var a = triangles[ti][0], b = triangles[ti][1], c = triangles[ti][2];
+      var edges = [[a, b], [b, c], [c, a]];
+      for (var e = 0; e < 3; e++) {
+        var u = edges[e][0], v = edges[e][1];
+        var key = u < v ? u + ',' + v : v + ',' + u;
+        var neighbors = edgeMap.get(key);
+        if (!neighbors) continue;
+        for (var ni = 0; ni < neighbors.length; ni++) {
+          if (!visited[neighbors[ni]]) {
+            visited[neighbors[ni]] = 1;
+            queue.push(neighbors[ni]);
+          }
+        }
+      }
+    }
+    components.push(component);
+  }
+  return components;
+}
+
+function removeSmallShells(vertices, triangles, threshold) {
+  var components = findConnectedComponents(triangles);
+  if (components.length <= 1) return { vertices: vertices, triangles: triangles, removed: 0 };
+  var totalArea = 0;
+  var compAreas = new Array(components.length);
+  for (var ci = 0; ci < components.length; ci++) {
+    var area = 0;
+    for (var j = 0; j < components[ci].length; j++) {
+      var ti = components[ci][j];
+      var a = triangles[ti][0], b = triangles[ti][1], c = triangles[ti][2];
+      var ax = vertices[a][0], ay = vertices[a][1], az = vertices[a][2];
+      var bx = vertices[b][0], by = vertices[b][1], bz = vertices[b][2];
+      var cx = vertices[c][0], cy = vertices[c][1], cz = vertices[c][2];
+      var e1x = bx-ax, e1y = by-ay, e1z = bz-az;
+      var e2x = cx-ax, e2y = cy-ay, e2z = cz-az;
+      var nx = e1y*e2z - e1z*e2y, ny = e1z*e2x - e1x*e2z, nz = e1x*e2y - e1y*e2x;
+      area += Math.sqrt(nx*nx + ny*ny + nz*nz) * 0.5;
+    }
+    compAreas[ci] = area;
+    totalArea += area;
+  }
+  var removeTris = new Set();
+  var removed = 0;
+  for (var ci = 0; ci < components.length; ci++) {
+    if (compAreas[ci] < totalArea * threshold) {
+      for (var j = 0; j < components[ci].length; j++) removeTris.add(components[ci][j]);
+      removed++;
+    }
+  }
+  if (removeTris.size === 0) return { vertices: vertices, triangles: triangles, removed: 0 };
+  var newTris = [];
+  for (var i = 0; i < triangles.length; i++) {
+    if (!removeTris.has(i)) newTris.push(triangles[i]);
+  }
+  var usedVerts = new Set();
+  for (var i = 0; i < newTris.length; i++) {
+    usedVerts.add(newTris[i][0]); usedVerts.add(newTris[i][1]); usedVerts.add(newTris[i][2]);
+  }
+  var sortedVerts = Array.from(usedVerts).sort(function(a,b){return a-b;});
+  var vertMap = new Map();
+  var newVerts = [];
+  for (var i = 0; i < sortedVerts.length; i++) {
+    vertMap.set(sortedVerts[i], newVerts.length);
+    newVerts.push(vertices[sortedVerts[i]]);
+  }
+  var remappedTris = [];
+  for (var i = 0; i < newTris.length; i++) {
+    remappedTris.push([vertMap.get(newTris[i][0]), vertMap.get(newTris[i][1]), vertMap.get(newTris[i][2])]);
+  }
+  return { vertices: newVerts, triangles: remappedTris, removed: removed };
+}
+
+// ===== Stage 2: 反対巻き重複面除去 =====
+function removeOppositeWindingDuplicates(triangles) {
+  var groups = new Map();
+  for (var i = 0; i < triangles.length; i++) {
+    var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
+    var uk = unorderedKey(a, b, c);
+    if (!groups.has(uk)) groups.set(uk, []);
+    groups.get(uk).push(i);
+  }
+  var toRemove = new Set();
+  var pairsRemoved = 0;
+  for (var entry of groups) {
+    var indices = entry[1];
+    if (indices.length < 2) continue;
+    var byWinding = new Map();
+    for (var idx of indices) {
+      var a = triangles[idx][0], b = triangles[idx][1], c = triangles[idx][2];
+      var wk = windingKey(a, b, c);
+      if (!byWinding.has(wk)) byWinding.set(wk, []);
+      byWinding.get(wk).push(idx);
+    }
+    if (byWinding.size >= 2) {
+      var windingArrays = Array.from(byWinding.values());
+      var classA = windingArrays[0];
+      var classB = windingArrays[1];
+      var pairs = Math.min(classA.length, classB.length);
+      for (var j = 0; j < pairs; j++) {
+        toRemove.add(classA[j]);
+        toRemove.add(classB[j]);
+        pairsRemoved++;
+      }
+    }
+  }
+  if (toRemove.size === 0) return { triangles: triangles, pairsRemoved: 0 };
+  var result = [];
+  for (var i = 0; i < triangles.length; i++) {
+    if (!toRemove.has(i)) result.push(triangles[i]);
+  }
+  return { triangles: result, pairsRemoved: pairsRemoved };
+}
+
+// ===== Stage 3: 完全重複除去 =====
+function removeExactDuplicates(triangles) {
+  var seen = new Set();
+  var result = [];
+  var removed = 0;
+  for (var i = 0; i < triangles.length; i++) {
+    var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
+    var wk = windingKey(a, b, c);
+    if (seen.has(wk)) { removed++; continue; }
+    seen.add(wk);
+    result.push([a, b, c]);
+  }
+  return { triangles: result, removed: removed };
+}
+
+// ===== Stage 4: 法線整合性 =====
+function enforceNormalConsistency(vertices, triangles, skipVolumeTest) {
+  var n = triangles.length;
+  if (n === 0) return { triangles: triangles, flipped: 0 };
+
+  var edgeMap = new Map();
+  for (var i = 0; i < n; i++) {
+    var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
+    var edges = [[a,b],[b,c],[c,a]];
+    for (var e = 0; e < 3; e++) {
+      var u = edges[e][0], v = edges[e][1];
+      var k = undirEdgeKey(u, v);
+      if (!edgeMap.has(k)) edgeMap.set(k, { fwd: [], rev: [] });
+      var entry = edgeMap.get(k);
+      if (u < v) entry.fwd.push(i);
+      else entry.rev.push(i);
+    }
+  }
+
+  var adj = new Array(n);
+  for (var i = 0; i < n; i++) adj[i] = [];
+
+  for (var entry of edgeMap) {
+    var fwd = entry[1].fwd, rev = entry[1].rev;
+    var edgeTotal = fwd.length + rev.length;
+    if (edgeTotal === 4) continue;
+    for (var fi = 0; fi < fwd.length; fi++) {
+      for (var ri = 0; ri < rev.length; ri++) {
+        if (fwd[fi] !== rev[ri]) {
+          adj[fwd[fi]].push({ neighbor: rev[ri], consistent: true });
+          adj[rev[ri]].push({ neighbor: fwd[fi], consistent: true });
+        }
+      }
+    }
+    for (var i = 0; i < fwd.length; i++) {
+      for (var j = i+1; j < fwd.length; j++) {
+        adj[fwd[i]].push({ neighbor: fwd[j], consistent: false });
+        adj[fwd[j]].push({ neighbor: fwd[i], consistent: false });
+      }
+    }
+    for (var i = 0; i < rev.length; i++) {
+      for (var j = i+1; j < rev.length; j++) {
+        adj[rev[i]].push({ neighbor: rev[j], consistent: false });
+        adj[rev[j]].push({ neighbor: rev[i], consistent: false });
+      }
+    }
+  }
+
+  var orientation = new Int8Array(n);
+  var totalFlipped = 0;
+
+  for (var seed = 0; seed < n; seed++) {
+    if (orientation[seed] !== 0) continue;
+    orientation[seed] = 1;
+    var componentTris = [seed];
+    var queue = [seed];
+    while (queue.length > 0) {
+      var current = queue.shift();
+      var curFlip = orientation[current] === 2;
+      for (var ai = 0; ai < adj[current].length; ai++) {
+        var nb = adj[current][ai].neighbor;
+        var consistent = adj[current][ai].consistent;
+        if (orientation[nb] !== 0) continue;
+        if (curFlip !== !consistent) {
+          orientation[nb] = 2;
+        } else {
+          orientation[nb] = 1;
+        }
+        componentTris.push(nb);
+        queue.push(nb);
+      }
+    }
+    var volume = 0;
+    for (var ci = 0; ci < componentTris.length; ci++) {
+      var ti = componentTris[ci];
+      var a = triangles[ti][0], b = triangles[ti][1], c = triangles[ti][2];
+      if (orientation[ti] === 2) { var tmp = b; b = c; c = tmp; }
+      var v0 = vertices[a], v1 = vertices[b], v2 = vertices[c];
+      volume += v0[0]*(v1[1]*v2[2]-v1[2]*v2[1])
+              + v0[1]*(v1[2]*v2[0]-v1[0]*v2[2])
+              + v0[2]*(v1[0]*v2[1]-v1[1]*v2[0]);
+    }
+    if (!skipVolumeTest && volume < 0) {
+      for (var ci = 0; ci < componentTris.length; ci++) {
+        var ti = componentTris[ci];
+        orientation[ti] = orientation[ti] === 1 ? 2 : 1;
+      }
+    }
+  }
+
+  var result = [];
+  for (var i = 0; i < n; i++) {
+    var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
+    if (orientation[i] === 2) {
+      result.push([a, c, b]);
+      totalFlipped++;
+    } else {
+      result.push([a, b, c]);
+    }
+  }
+  return { triangles: result, flipped: totalFlipped };
+}
+
+// 巻き方向不整合エッジ数をカウント
+function countWindingInconsistencies(triangles) {
+  var edgeInfo = new Map();
+  for (var i = 0; i < triangles.length; i++) {
+    var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
+    var edges = [[a, b], [b, c], [c, a]];
+    for (var e = 0; e < 3; e++) {
+      var u = edges[e][0], v = edges[e][1];
+      var k = undirEdgeKey(u, v);
+      if (!edgeInfo.has(k)) edgeInfo.set(k, { fwd: [], rev: [] });
+      var entry = edgeInfo.get(k);
+      if (u < v) entry.fwd.push(i); else entry.rev.push(i);
+    }
+  }
+  var count = 0;
+  for (var entry of edgeInfo) {
+    var info = entry[1];
+    if (info.fwd.length + info.rev.length !== 2) continue;
+    if (info.fwd.length === 2 || info.rev.length === 2) count++;
+  }
+  return count;
+}
+
+// 巻き方向不整合をエッジフリップ+三角形フリップで修正
+function fixWindingByEdgeFlip(vertices, triangles, maxPasses) {
+  if (maxPasses === undefined) maxPasses = 20;
+  if (maxPasses > 50) maxPasses = 50;
+  var T = [];
+  for (var i = 0; i < triangles.length; i++) T.push([triangles[i][0], triangles[i][1], triangles[i][2]]);
+  var totalFixed = 0;
+  var prevWI = Infinity;
+  var stagnantCount = 0;
+
+  for (var pass = 0; pass < maxPasses; pass++) {
+    if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+    // 不整合エッジを検出
+    var edgeInfo = new Map();
+    for (var i = 0; i < T.length; i++) {
+      var a = T[i][0], b = T[i][1], c = T[i][2];
+      var edges = [[a, b], [b, c], [c, a]];
+      for (var e = 0; e < 3; e++) {
+        var u = edges[e][0], v = edges[e][1];
+        var k = undirEdgeKey(u, v);
+        if (!edgeInfo.has(k)) edgeInfo.set(k, { fwd: [], rev: [] });
+        var entry = edgeInfo.get(k);
+        if (u < v) entry.fwd.push(i); else entry.rev.push(i);
+      }
+    }
+
+    var inconEdges = [];
+    var inconTris = new Set();
+    for (var entry of edgeInfo) {
+      var k = entry[0], info = entry[1];
+      if (info.fwd.length + info.rev.length !== 2) continue;
+      if (info.fwd.length === 2 || info.rev.length === 2) {
+        var pair = info.fwd.length === 2 ? info.fwd : info.rev;
+        inconEdges.push({ key: k, tri1: pair[0], tri2: pair[1] });
+        inconTris.add(pair[0]);
+        inconTris.add(pair[1]);
+      }
+    }
+
+    if (inconEdges.length === 0) break;
+
+    // Stagnation detection: if WI count doesn't decrease for 3 consecutive passes, break
+    var curWI = inconEdges.length;
+    if (curWI >= prevWI) {
+      stagnantCount++;
+      if (stagnantCount >= 3) break;
+    } else {
+      stagnantCount = 0;
+    }
+    prevWI = curWI;
+
+    var improved = false;
+
+    // バッチ三角形フリップ: 不整合に関与する三角形を一括反転
+    {
+      var triInconCount = new Map();
+      for (var ie = 0; ie < inconEdges.length; ie++) {
+        triInconCount.set(inconEdges[ie].tri1, (triInconCount.get(inconEdges[ie].tri1) || 0) + 1);
+        triInconCount.set(inconEdges[ie].tri2, (triInconCount.get(inconEdges[ie].tri2) || 0) + 1);
+      }
+
+      var candidates = [];
+      for (var ti of inconTris) candidates.push(ti);
+      candidates.sort(function(a, b) { return (triInconCount.get(b) || 0) - (triInconCount.get(a) || 0); });
+
+      var flippedInPass = new Set();
+      for (var ci = 0; ci < candidates.length; ci++) {
+        var ti = candidates[ci];
+        if (flippedInPass.has(ti)) continue;
+
+        var a = T[ti][0], b = T[ti][1], c = T[ti][2];
+        var myEdges = [[a, b], [b, c], [c, a]];
+        var wiBefore = 0, wiAfter = 0;
+
+        for (var me = 0; me < 3; me++) {
+          var u = myEdges[me][0], v = myEdges[me][1];
+          var ek = undirEdgeKey(u, v);
+          var einfo = edgeInfo.get(ek);
+          if (!einfo || einfo.fwd.length + einfo.rev.length !== 2) continue;
+          if (einfo.fwd.length === 2 || einfo.rev.length === 2) wiBefore++;
+          var isFwd = u < v;
+          var newFwd = einfo.fwd.length, newRev = einfo.rev.length;
+          if (isFwd) { newFwd--; newRev++; } else { newRev--; newFwd++; }
+          if (newFwd + newRev === 2 && (newFwd === 2 || newRev === 2)) wiAfter++;
+        }
+
+        if (wiAfter < wiBefore) {
+          var tmp = T[ti][1]; T[ti][1] = T[ti][2]; T[ti][2] = tmp;
+          flippedInPass.add(ti);
+          totalFixed++;
+          improved = true;
+          // edgeInfoを更新
+          for (var me2 = 0; me2 < 3; me2++) {
+            var u2 = myEdges[me2][0], v2 = myEdges[me2][1];
+            var ek2 = undirEdgeKey(u2, v2);
+            var einfo2 = edgeInfo.get(ek2);
+            if (!einfo2) continue;
+            var isFwd2 = u2 < v2;
+            if (isFwd2) {
+              var idx = einfo2.fwd.indexOf(ti);
+              if (idx >= 0) einfo2.fwd.splice(idx, 1);
+              einfo2.rev.push(ti);
+            } else {
+              var idx2 = einfo2.rev.indexOf(ti);
+              if (idx2 >= 0) einfo2.rev.splice(idx2, 1);
+              einfo2.fwd.push(ti);
+            }
+          }
+        }
+      }
+    }
+
+    // バッチフリップで改善しなかった場合、エッジフリップを試行
+    if (!improved) {
+      for (var ei = 0; ei < Math.min(inconEdges.length, 50); ei++) {
+        var tri1 = inconEdges[ei].tri1, tri2 = inconEdges[ei].tri2;
+        var t1 = T[tri1], t2 = T[tri2];
+
+        var shared = [];
+        for (var si = 0; si < 3; si++) {
+          for (var sj = 0; sj < 3; sj++) {
+            if (t1[si] === t2[sj]) shared.push(t1[si]);
+          }
+        }
+        if (shared.length !== 2) continue;
+
+        var sa = shared[0], sb = shared[1];
+        var sc = -1, sd = -1;
+        for (var si2 = 0; si2 < 3; si2++) {
+          if (t1[si2] !== sa && t1[si2] !== sb) sc = t1[si2];
+          if (t2[si2] !== sa && t2[si2] !== sb) sd = t2[si2];
+        }
+        if (sc === sd || sc === -1 || sd === -1) continue;
+
+        // edgeInfoで新対角線の既存チェック（O(1)）
+        var cdKey = undirEdgeKey(sc, sd);
+        if (edgeInfo.has(cdKey)) continue;
+
+        var options = [
+          [[sa, sc, sd], [sb, sd, sc]],
+          [[sa, sd, sc], [sb, sc, sd]]
+        ];
+
+        for (var oi = 0; oi < options.length; oi++) {
+          var nt1 = options[oi][0], nt2 = options[oi][1];
+          // Local WI delta: only examine edges of old/new tri1,tri2 (O(1) vs O(T))
+          var affected = new Map();
+          var oet1 = T[tri1], oet2 = T[tri2];
+          var oEdges = [[oet1[0],oet1[1]],[oet1[1],oet1[2]],[oet1[2],oet1[0]],
+                        [oet2[0],oet2[1]],[oet2[1],oet2[2]],[oet2[2],oet2[0]]];
+          var nEdges = [[nt1[0],nt1[1]],[nt1[1],nt1[2]],[nt1[2],nt1[0]],
+                        [nt2[0],nt2[1]],[nt2[1],nt2[2]],[nt2[2],nt2[0]]];
+          for (var ae = 0; ae < 6; ae++) {
+            var aek = undirEdgeKey(oEdges[ae][0], oEdges[ae][1]);
+            if (!affected.has(aek)) {
+              var aInfo = edgeInfo.get(aek);
+              var ef = 0, er = 0;
+              if (aInfo) {
+                for (var ai = 0; ai < aInfo.fwd.length; ai++) {
+                  if (aInfo.fwd[ai] !== tri1 && aInfo.fwd[ai] !== tri2) ef++;
+                }
+                for (var ai = 0; ai < aInfo.rev.length; ai++) {
+                  if (aInfo.rev[ai] !== tri1 && aInfo.rev[ai] !== tri2) er++;
+                }
+              }
+              affected.set(aek, [ef, er, ef, er]);
+            }
+            var ad = affected.get(aek);
+            if (oEdges[ae][0] < oEdges[ae][1]) ad[0]++; else ad[1]++;
+          }
+          for (var ae = 0; ae < 6; ae++) {
+            var aek = undirEdgeKey(nEdges[ae][0], nEdges[ae][1]);
+            if (!affected.has(aek)) {
+              var aInfo = edgeInfo.get(aek);
+              var ef = 0, er = 0;
+              if (aInfo) {
+                for (var ai = 0; ai < aInfo.fwd.length; ai++) {
+                  if (aInfo.fwd[ai] !== tri1 && aInfo.fwd[ai] !== tri2) ef++;
+                }
+                for (var ai = 0; ai < aInfo.rev.length; ai++) {
+                  if (aInfo.rev[ai] !== tri1 && aInfo.rev[ai] !== tri2) er++;
+                }
+              }
+              affected.set(aek, [ef, er, ef, er]);
+            }
+            var ad = affected.get(aek);
+            if (nEdges[ae][0] < nEdges[ae][1]) ad[2]++; else ad[3]++;
+          }
+          var wiDelta = 0;
+          for (var aEntry of affected) {
+            var dd = aEntry[1];
+            if (dd[0] + dd[1] === 2 && (dd[0] === 2 || dd[1] === 2)) wiDelta--;
+            if (dd[2] + dd[3] === 2 && (dd[2] === 2 || dd[3] === 2)) wiDelta++;
+          }
+          if (wiDelta < 0) {
+            T[tri1] = nt1;
+            T[tri2] = nt2;
+            totalFixed++;
+            improved = true;
+            break;
+          }
+        }
+        if (improved) break;
+      }
+    }
+
+    if (!improved) break;
+  }
+
+  return { vertices: vertices, triangles: T, fixed: totalFixed };
+}
+
+// 巻き方向不整合の局所リメッシュ（1-ring近傍除去 + BFS再実行）
+function fixWindingByLocalRemesh(vertices, triangles, fractionLimit) {
+  if (fractionLimit === undefined) fractionLimit = 0.3;
+  var T = [];
+  for (var i = 0; i < triangles.length; i++) T.push([triangles[i][0], triangles[i][1], triangles[i][2]]);
+
+  for (var iter = 0; iter < 3; iter++) {
+    if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+    var wi = countWindingInconsistencies(T);
+    if (wi === 0) break;
+
+    // 不整合エッジを検出
+    var edgeInfo = new Map();
+    for (var i = 0; i < T.length; i++) {
+      var a = T[i][0], b = T[i][1], c = T[i][2];
+      var edges = [[a, b], [b, c], [c, a]];
+      for (var e = 0; e < 3; e++) {
+        var u = edges[e][0], v = edges[e][1];
+        var k = undirEdgeKey(u, v);
+        if (!edgeInfo.has(k)) edgeInfo.set(k, { fwd: [], rev: [] });
+        var entry = edgeInfo.get(k);
+        if (u < v) entry.fwd.push(i); else entry.rev.push(i);
+      }
+    }
+
+    var inconTriSet = new Set();
+    for (var entry of edgeInfo) {
+      var info = entry[1];
+      if (info.fwd.length + info.rev.length !== 2) continue;
+      if (info.fwd.length === 2 || info.rev.length === 2) {
+        var pair = info.fwd.length === 2 ? info.fwd : info.rev;
+        inconTriSet.add(pair[0]);
+        inconTriSet.add(pair[1]);
+      }
+    }
+
+    if (inconTriSet.size === 0) break;
+
+    // 境界エッジに接する三角形を保護
+    var edgeCount = new Map();
+    for (var i = 0; i < T.length; i++) {
+      var a = T[i][0], b = T[i][1], c = T[i][2];
+      var ek1 = undirEdgeKey(a, b), ek2 = undirEdgeKey(b, c), ek3 = undirEdgeKey(c, a);
+      edgeCount.set(ek1, (edgeCount.get(ek1) || 0) + 1);
+      edgeCount.set(ek2, (edgeCount.get(ek2) || 0) + 1);
+      edgeCount.set(ek3, (edgeCount.get(ek3) || 0) + 1);
+    }
+    var boundaryTris = new Set();
+    for (var i = 0; i < T.length; i++) {
+      var a = T[i][0], b = T[i][1], c = T[i][2];
+      if (edgeCount.get(undirEdgeKey(a, b)) === 1 || edgeCount.get(undirEdgeKey(b, c)) === 1 || edgeCount.get(undirEdgeKey(c, a)) === 1) {
+        boundaryTris.add(i);
+      }
+    }
+
+    // 1-ring近傍を収集（境界三角形は除外）
+    var inconVerts = new Set();
+    for (var ti of inconTriSet) {
+      inconVerts.add(T[ti][0]);
+      inconVerts.add(T[ti][1]);
+      inconVerts.add(T[ti][2]);
+    }
+
+    var ring1 = new Set();
+    for (var i = 0; i < T.length; i++) {
+      if (boundaryTris.has(i)) continue;
+      if (inconVerts.has(T[i][0]) || inconVerts.has(T[i][1]) || inconVerts.has(T[i][2])) {
+        ring1.add(i);
+      }
+    }
+
+    // 除去量が全体の30%を超える場合はスキップ
+    if (ring1.size > T.length * fractionLimit) break;
+
+    // 1-ring除去
+    var newT = [];
+    for (var i = 0; i < T.length; i++) {
+      if (!ring1.has(i)) newT.push(T[i]);
+    }
+
+    // BFS再実行
+    var bfsResult = enforceNormalConsistency(vertices, newT, true);
+
+    var newWI = countWindingInconsistencies(bfsResult.triangles);
+    if (newWI >= wi) break;
+
+    T = bfsResult.triangles;
+  }
+
+  return { triangles: T };
+}
+
+// ===== Stage 5: 非多様体エッジ解決 =====
+function resolveNonManifoldEdges(vertices, triangles, maxIterations) {
+  if (maxIterations === undefined) maxIterations = 50;
+  var tris = triangles.slice();
+  var totalFixed = 0;
+  for (var iter = 0; iter < maxIterations; iter++) {
+    if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+    var undirMap = new Map();
+    for (var i = 0; i < tris.length; i++) {
+      var a = tris[i][0], b = tris[i][1], c = tris[i][2];
+      var edges = [[a,b],[b,c],[c,a]];
+      for (var e = 0; e < 3; e++) {
+        var k = undirEdgeKey(edges[e][0], edges[e][1]);
+        if (!undirMap.has(k)) undirMap.set(k, []);
+        undirMap.get(k).push(i);
+      }
+    }
+    var nmEdges = [];
+    for (var entry of undirMap) {
+      if (entry[1].length > 2 && entry[1].length !== 4) nmEdges.push({ key: entry[0], tris: entry[1] });
+    }
+    if (nmEdges.length === 0) break;
+
+    var triNMCount = new Map();
+    for (var ne = 0; ne < nmEdges.length; ne++) {
+      var triList = nmEdges[ne].tris;
+      for (var ti of triList) triNMCount.set(ti, (triNMCount.get(ti) || 0) + 1);
+    }
+
+    var triScores = new Map();
+    for (var ne = 0; ne < nmEdges.length; ne++) {
+      var triList = nmEdges[ne].tris;
+      for (var ti of triList) {
+        if (triScores.has(ti)) continue;
+        var a = tris[ti][0], b = tris[ti][1], c = tris[ti][2];
+        var triEdges = [undirEdgeKey(a,b), undirEdgeKey(b,c), undirEdgeKey(c,a)];
+        var manifoldEdges = 0;
+        for (var e = 0; e < 3; e++) {
+          var et = undirMap.get(triEdges[e]);
+          if (et && et.length === 2) manifoldEdges++;
+        }
+        var nmCount = triNMCount.get(ti) || 0;
+        var score = manifoldEdges * 10 - nmCount * 5;
+        var n1 = computeNormal(vertices, a, b, c);
+        for (var e = 0; e < 3; e++) {
+          var et = undirMap.get(triEdges[e]);
+          if (!et || et.length !== 2) continue;
+          var otherIdx = et[0] === ti ? et[1] : et[0];
+          var n2 = computeNormal(vertices, tris[otherIdx][0], tris[otherIdx][1], tris[otherIdx][2]);
+          score += (n1[0]*n2[0] + n1[1]*n2[1] + n1[2]*n2[2]) * 3;
+        }
+        triScores.set(ti, score);
+      }
+    }
+
+    var toRemove = new Set();
+    for (var ne = 0; ne < nmEdges.length; ne++) {
+      var triList = nmEdges[ne].tris;
+      var scored = triList.map(function(ti) { return { idx: ti, score: triScores.get(ti) || 0 }; });
+      scored.sort(function(a, b) { return b.score - a.score; });
+      for (var i = 2; i < scored.length; i++) toRemove.add(scored[i].idx);
+    }
+    if (toRemove.size === 0) break;
+    totalFixed += toRemove.size;
+    var newTris = [];
+    for (var i = 0; i < tris.length; i++) {
+      if (!toRemove.has(i)) newTris.push(tris[i]);
+    }
+    tris = newTris;
+  }
+  return { triangles: tris, fixed: totalFixed };
+}
+
+// ===== 自己交差検出・修復 =====
+function buildBVH(V, T) {
+  var triBoxes = new Array(T.length);
+  for (var i = 0; i < T.length; i++) {
+    var a = T[i][0], b = T[i][1], c = T[i][2];
+    var ax = V[a][0], ay = V[a][1], az = V[a][2];
+    var bx = V[b][0], by = V[b][1], bz = V[b][2];
+    var cx = V[c][0], cy = V[c][1], cz = V[c][2];
+    triBoxes[i] = [
+      Math.min(ax, bx, cx), Math.min(ay, by, cy), Math.min(az, bz, cz),
+      Math.max(ax, bx, cx), Math.max(ay, by, cy), Math.max(az, bz, cz)
+    ];
+  }
+  function mergeBoxes(boxes, indices) {
+    var x0=Infinity,y0=Infinity,z0=Infinity,x1=-Infinity,y1=-Infinity,z1=-Infinity;
+    for (var i=0;i<indices.length;i++) {
+      var b=boxes[indices[i]];
+      if(b[0]<x0)x0=b[0];if(b[1]<y0)y0=b[1];if(b[2]<z0)z0=b[2];
+      if(b[3]>x1)x1=b[3];if(b[4]>y1)y1=b[4];if(b[5]>z1)z1=b[5];
+    }
+    return [x0,y0,z0,x1,y1,z1];
+  }
+  function buildRec(indices) {
+    if (indices.length <= 4) {
+      return { box: mergeBoxes(triBoxes, indices), indices: indices };
+    }
+    var box = mergeBoxes(triBoxes, indices);
+    var dx=box[3]-box[0],dy=box[4]-box[1],dz=box[5]-box[2];
+    var axis = dx>=dy&&dx>=dz ? 0 : (dy>=dz ? 1 : 2);
+    indices.sort(function(a,b) {
+      return (triBoxes[a][axis]+triBoxes[a][axis+3]) - (triBoxes[b][axis]+triBoxes[b][axis+3]);
+    });
+    var mid = indices.length >> 1;
+    var left = buildRec(indices.slice(0, mid));
+    var right = buildRec(indices.slice(mid));
+    return { box: box, left: left, right: right };
+  }
+  var allIndices = [];
+  for (var i = 0; i < T.length; i++) allIndices.push(i);
+  return { root: buildRec(allIndices), triBoxes: triBoxes };
+}
+
+function bvhQuery(node, queryBox) {
+  var results = [];
+  var stack = [node];
+  while (stack.length > 0) {
+    var n = stack.pop();
+    if (n.box[0]>queryBox[3]||n.box[3]<queryBox[0]||
+        n.box[1]>queryBox[4]||n.box[4]<queryBox[1]||
+        n.box[2]>queryBox[5]||n.box[5]<queryBox[2]) continue;
+    if (n.indices) {
+      for (var i=0;i<n.indices.length;i++) results.push(n.indices[i]);
+    } else {
+      if (n.left) stack.push(n.left);
+      if (n.right) stack.push(n.right);
+    }
+  }
+  return results;
+}
+
+function computeInterval(p0, p1, p2, d0, d1, d2) {
+  var eps = 1e-12;
+  var vals = [];
+  if (Math.abs(d0-d1)>eps && d0*d1<0) vals.push(p0+(p1-p0)*d0/(d0-d1));
+  if (Math.abs(d1-d2)>eps && d1*d2<0) vals.push(p1+(p2-p1)*d1/(d1-d2));
+  if (Math.abs(d2-d0)>eps && d2*d0<0) vals.push(p2+(p0-p2)*d2/(d2-d0));
+  if (Math.abs(d0)<=eps) vals.push(p0);
+  if (Math.abs(d1)<=eps) vals.push(p1);
+  if (Math.abs(d2)<=eps) vals.push(p2);
+  if (vals.length < 2) return null;
+  var lo=vals[0],hi=vals[0];
+  for (var i=1;i<vals.length;i++) { if(vals[i]<lo)lo=vals[i]; if(vals[i]>hi)hi=vals[i]; }
+  return [lo, hi];
+}
+
+function trianglesIntersect(V, T, t1, t2) {
+  var tri1=T[t1], tri2=T[t2];
+  for (var i=0;i<3;i++) for (var j=0;j<3;j++) if (tri1[i]===tri2[j]) return false;
+  var p0=V[tri1[0]],p1=V[tri1[1]],p2=V[tri1[2]];
+  var q0=V[tri2[0]],q1=V[tri2[1]],q2=V[tri2[2]];
+  var e1x=q1[0]-q0[0],e1y=q1[1]-q0[1],e1z=q1[2]-q0[2];
+  var e2x=q2[0]-q0[0],e2y=q2[1]-q0[1],e2z=q2[2]-q0[2];
+  var n2x=e1y*e2z-e1z*e2y,n2y=e1z*e2x-e1x*e2z,n2z=e1x*e2y-e1y*e2x;
+  var d2=-(n2x*q0[0]+n2y*q0[1]+n2z*q0[2]);
+  var dp0=n2x*p0[0]+n2y*p0[1]+n2z*p0[2]+d2;
+  var dp1=n2x*p1[0]+n2y*p1[1]+n2z*p1[2]+d2;
+  var dp2=n2x*p2[0]+n2y*p2[1]+n2z*p2[2]+d2;
+  if (dp0>0&&dp1>0&&dp2>0) return false;
+  if (dp0<0&&dp1<0&&dp2<0) return false;
+  var f1x=p1[0]-p0[0],f1y=p1[1]-p0[1],f1z=p1[2]-p0[2];
+  var f2x=p2[0]-p0[0],f2y=p2[1]-p0[1],f2z=p2[2]-p0[2];
+  var n1x=f1y*f2z-f1z*f2y,n1y=f1z*f2x-f1x*f2z,n1z=f1x*f2y-f1y*f2x;
+  var d1=-(n1x*p0[0]+n1y*p0[1]+n1z*p0[2]);
+  var dq0=n1x*q0[0]+n1y*q0[1]+n1z*q0[2]+d1;
+  var dq1=n1x*q1[0]+n1y*q1[1]+n1z*q1[2]+d1;
+  var dq2=n1x*q2[0]+n1y*q2[1]+n1z*q2[2]+d1;
+  if (dq0>0&&dq1>0&&dq2>0) return false;
+  if (dq0<0&&dq1<0&&dq2<0) return false;
+  var lx=n1y*n2z-n1z*n2y,ly=n1z*n2x-n1x*n2z,lz=n1x*n2y-n1y*n2x;
+  var projP0=lx*p0[0]+ly*p0[1]+lz*p0[2];
+  var projP1=lx*p1[0]+ly*p1[1]+lz*p1[2];
+  var projP2=lx*p2[0]+ly*p2[1]+lz*p2[2];
+  var projQ0=lx*q0[0]+ly*q0[1]+lz*q0[2];
+  var projQ1=lx*q1[0]+ly*q1[1]+lz*q1[2];
+  var projQ2=lx*q2[0]+ly*q2[1]+lz*q2[2];
+  var int1 = computeInterval(projP0, projP1, projP2, dp0, dp1, dp2);
+  var int2 = computeInterval(projQ0, projQ1, projQ2, dq0, dq1, dq2);
+  if (!int1 || !int2) return false;
+  return int1[0] < int2[1] && int2[0] < int1[1];
+}
+
+function detectSelfIntersections(V, T) {
+  var bvh = buildBVH(V, T);
+  var pairs = [];
+  var seen = new Set();
+  for (var i = 0; i < T.length; i++) {
+    var candidates = bvhQuery(bvh.root, bvh.triBoxes[i]);
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var j = candidates[ci];
+      if (j <= i) continue;
+      var key = i + ',' + j;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (trianglesIntersect(V, T, i, j)) pairs.push([i, j]);
+    }
+  }
+  return pairs;
+}
+
+function repairSelfIntersections(V, T, holeMaxTriArea) {
+  var vertices = V;
+  var triangles = T;
+  var totalRepaired = 0;
+  for (var iter = 0; iter < 100; iter++) {
+    if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+    var pairs = detectSelfIntersections(vertices, triangles);
+    if (pairs.length === 0) break;
+    var toRemove = new Set();
+    for (var pi = 0; pi < pairs.length; pi++) { toRemove.add(pairs[pi][0]); toRemove.add(pairs[pi][1]); }
+    var intersectingVerts = new Set();
+    for (var ti of toRemove) {
+      var a=triangles[ti][0],b=triangles[ti][1],c=triangles[ti][2];
+      intersectingVerts.add(a); intersectingVerts.add(b); intersectingVerts.add(c);
+    }
+    for (var i = 0; i < triangles.length; i++) {
+      if (toRemove.has(i)) continue;
+      var a=triangles[i][0],b=triangles[i][1],c=triangles[i][2];
+      if (intersectingVerts.has(a)||intersectingVerts.has(b)||intersectingVerts.has(c)) toRemove.add(i);
+    }
+    var prevCount = triangles.length;
+    var newTris = [];
+    for (var i = 0; i < triangles.length; i++) {
+      if (!toRemove.has(i)) newTris.push(triangles[i]);
+    }
+    triangles = newTris;
+    if (prevCount - triangles.length === 0) break;
+    var fillResult = fillAllHoles(vertices, triangles, holeMaxTriArea);
+    vertices = fillResult.vertices;
+    triangles = fillResult.triangles;
+    totalRepaired += pairs.length;
+    var newPairs = detectSelfIntersections(vertices, triangles);
+    if (newPairs.length >= pairs.length) break;
+  }
+  return { vertices: vertices, triangles: triangles, repaired: totalRepaired };
+}
+
+function buildEdgeCounts(T) {
+  var counts = new Map();
+  for (var i = 0; i < T.length; i++) {
+    var a = T[i][0], b = T[i][1], c = T[i][2];
+    var pairs = [[a,b],[b,c],[c,a]];
+    for (var j = 0; j < 3; j++) {
+      var k = undirEdgeKey(pairs[j][0], pairs[j][1]);
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+  }
+  return counts;
+}
+
+// ===== Stage 6: 非多様体頂点解決 =====
+function resolveNonManifoldVertices(vertices, triangles) {
+  var totalSplit = 0;
+  var vertexTris = new Map();
+  for (var i = 0; i < triangles.length; i++) {
+    var tri = triangles[i];
+    for (var vi = 0; vi < 3; vi++) {
+      var v = tri[vi];
+      if (!vertexTris.has(v)) vertexTris.set(v, []);
+      vertexTris.get(v).push(i);
+    }
+  }
+  for (var entry of vertexTris) {
+    var v = entry[0], triIndices = entry[1];
+    if (triIndices.length < 2) continue;
+    var edgeToTris = new Map();
+    for (var idx of triIndices) {
+      var tri = triangles[idx];
+      var others = [];
+      if (tri[0] !== v) others.push(tri[0]);
+      if (tri[1] !== v) others.push(tri[1]);
+      if (tri[2] !== v) others.push(tri[2]);
+      for (var w of others) {
+        var ek = undirEdgeKey(v, w);
+        if (!edgeToTris.has(ek)) edgeToTris.set(ek, []);
+        edgeToTris.get(ek).push(idx);
+      }
+    }
+    var localAdj = new Map();
+    for (var idx of triIndices) localAdj.set(idx, new Set());
+    for (var etEntry of edgeToTris) {
+      var tris = etEntry[1];
+      for (var i = 0; i < tris.length; i++) {
+        for (var j = i+1; j < tris.length; j++) {
+          localAdj.get(tris[i]).add(tris[j]);
+          localAdj.get(tris[j]).add(tris[i]);
+        }
+      }
+    }
+    var visited = new Set();
+    var components = [];
+    for (var idx of triIndices) {
+      if (visited.has(idx)) continue;
+      var comp = [];
+      var queue = [idx];
+      visited.add(idx);
+      while (queue.length > 0) {
+        var cur = queue.shift();
+        comp.push(cur);
+        for (var nb of localAdj.get(cur)) {
+          if (!visited.has(nb)) { visited.add(nb); queue.push(nb); }
+        }
+      }
+      components.push(comp);
+    }
+    if (components.length <= 1) continue;
+    for (var ci = 1; ci < components.length; ci++) {
+      var newIdx = vertices.length;
+      vertices.push([vertices[v][0], vertices[v][1], vertices[v][2]]);
+      totalSplit++;
+      for (var ti of components[ci]) {
+        var tri = triangles[ti];
+        if (tri[0] === v) tri[0] = newIdx;
+        if (tri[1] === v) tri[1] = newIdx;
+        if (tri[2] === v) tri[2] = newIdx;
+      }
+    }
+  }
+  return { vertices: vertices, triangles: triangles, split: totalSplit };
+}
+
+// ===== Stage 7: 穴埋め =====
+function getBoundaryEdges(triangles) {
+  var edgeCount = new Map();
+  var edgeDir = new Map();
+  for (var i = 0; i < triangles.length; i++) {
+    var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
+    countEdge(edgeCount, edgeDir, a, b);
+    countEdge(edgeCount, edgeDir, b, c);
+    countEdge(edgeCount, edgeDir, c, a);
+  }
+  var boundary = [];
+  for (var entry of edgeCount) {
+    var k = entry[0], cnt = entry[1];
+    if (cnt === 1) {
+      var a = Math.floor(k / 1000000);
+      var b = k % 1000000;
+      boundary.push(edgeDir.get(k) === 1 ? [b, a] : [a, b]);
+    }
+  }
+  return boundary;
+}
+
+function countEdge(cntMap, dirMap, a, b) {
+  var k = undirEdgeKey(a, b);
+  cntMap.set(k, (cntMap.get(k) || 0) + 1);
+  dirMap.set(k, a < b ? 1 : 0);
+}
+
+function findAllLoops(edges) {
+  if (edges.length === 0) return [];
+  var loops = [];
+  var edgeUsed = new Uint8Array(edges.length);
+  var outMap = new Map();
+  for (var i = 0; i < edges.length; i++) {
+    var a = edges[i][0], b = edges[i][1];
+    if (!outMap.has(a)) outMap.set(a, []);
+    outMap.get(a).push({ to: b, idx: i });
+  }
+  for (var startIdx = 0; startIdx < edges.length; startIdx++) {
+    if (edgeUsed[startIdx]) continue;
+    var start = edges[startIdx][0];
+    var next = edges[startIdx][1];
+    edgeUsed[startIdx] = 1;
+    var path = [start];
+    var current = next;
+    var found = false;
+    for (var step = 0; step < 300; step++) {
+      if (current === start) {
+        if (path.length >= 3) found = true;
+        break;
+      }
+      var existingIdx = path.indexOf(current);
+      if (existingIdx >= 0) {
+        var innerLoop = path.slice(existingIdx);
+        if (innerLoop.length >= 3) loops.push(innerLoop);
+        path.length = existingIdx + 1;
+      } else {
+        path.push(current);
+      }
+      var outs = outMap.get(current) || [];
+      var advanced = false;
+      for (var i = 0; i < outs.length; i++) {
+        if (!edgeUsed[outs[i].idx]) {
+          edgeUsed[outs[i].idx] = 1;
+          current = outs[i].to;
+          advanced = true;
+          break;
+        }
+      }
+      if (!advanced) break;
+    }
+    if (found) loops.push(path);
+  }
+  return loops;
+}
+
+function fillTJunction(boundary) {
+  var outEdges = new Map();
+  var inEdges = new Map();
+  for (var i = 0; i < boundary.length; i++) {
+    var a = boundary[i][0], b = boundary[i][1];
+    if (!outEdges.has(a)) outEdges.set(a, []);
+    if (!inEdges.has(b)) inEdges.set(b, []);
+    outEdges.get(a).push(b);
+    inEdges.get(b).push(a);
+  }
+  for (var entry of outEdges) {
+    if (entry[1].length >= 2) return [entry[0], entry[1][1], entry[1][0]];
+  }
+  for (var entry of inEdges) {
+    if (entry[1].length >= 2) return [entry[0], entry[1][0], entry[1][1]];
+  }
+  return null;
+}
+
+// 開いたチェーンを検出（ループを形成しない境界エッジの連鎖）
+function findOpenChain(boundary) {
+  if (boundary.length === 0) return null;
+  var outMap = new Map();
+  var inMap = new Map();
+  for (var i = 0; i < boundary.length; i++) {
+    outMap.set(boundary[i][0], boundary[i][1]);
+    inMap.set(boundary[i][1], boundary[i][0]);
+  }
+  var start = -1;
+  for (var i = 0; i < boundary.length; i++) {
+    if (!inMap.has(boundary[i][0])) { start = boundary[i][0]; break; }
+  }
+  if (start === -1) return null;
+  var chain = [start];
+  var current = start;
+  for (var step = 0; step < boundary.length + 1; step++) {
+    if (!outMap.has(current)) break;
+    current = outMap.get(current);
+    if (current === start) break;
+    chain.push(current);
+  }
+  if (chain.length >= 3) return chain;
+  return null;
+}
+
+// 穴埋めヘルパー：全穴をear-clippingで埋める
+function fillAllHoles(vertices, triangles, maxTriAreaOverride) {
+  var T = triangles.slice();
+  var maxArea = maxTriAreaOverride || 0;
+  if (maxArea <= 0) {
+    var totalArea = 0;
+    for (var i = 0; i < T.length; i++) totalArea += triArea3D(vertices, T[i][0], T[i][1], T[i][2]);
+    var avgArea = T.length > 0 ? totalArea / T.length : 1;
+    maxArea = avgArea * 100;
+  }
+  var filled = 0;
+  var lastB = Infinity, stuck = 0;
+  for (var iter = 0; iter < 10000; iter++) {
+    if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+    var bnd = getBoundaryEdges(T);
+    if (bnd.length === 0) break;
+    if (bnd.length >= lastB) { stuck++; if (stuck > 10) break; } else stuck = 0;
+    lastB = bnd.length;
+    var loops = findAllLoops(bnd);
+    var ok = false;
+    if (loops.length > 0) {
+      loops.sort(function(a, b) { return a.length - b.length; });
+      for (var li = 0; li < loops.length; li++) {
+        if (loops[li].length < 3) continue;
+        var nt = fillHoleEarClipping(vertices, loops[li], maxArea);
+        if (nt.length > 0) { for (var j = 0; j < nt.length; j++) T.push(nt[j]); filled++; ok = true; break; }
+      }
+    }
+    if (!ok) {
+      var frc = fillTJunction(bnd);
+      if (frc && triArea3D(vertices, frc[0], frc[1], frc[2]) <= maxArea) { T.push(frc); filled++; ok = true; }
+    }
+    if (!ok) {
+      var ch = findOpenChain(bnd);
+      if (ch && ch.length >= 3) {
+        var nt2 = fillHoleEarClipping(vertices, ch, maxArea);
+        if (nt2.length > 0) { for (var j2 = 0; j2 < nt2.length; j2++) T.push(nt2[j2]); filled++; ok = true; }
+      }
+    }
+    if (!ok) break;
+  }
+  return { vertices: vertices, triangles: T, filled: filled };
+}
+
+function pointInTriangle2D(p, a, b, c) {
+  var d1 = (p[0]-c[0])*(a[1]-c[1]) - (a[0]-c[0])*(p[1]-c[1]);
+  var d2 = (p[0]-a[0])*(b[1]-a[1]) - (b[0]-a[0])*(p[1]-a[1]);
+  var d3 = (p[0]-b[0])*(c[1]-b[1]) - (c[0]-b[0])*(p[1]-b[1]);
+  var hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+  var hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+  return !(hasNeg && hasPos);
+}
+
+function fillHoleEarClipping(V, loop, maxTriArea) {
+  var n = loop.length;
+  if (n < 3) return [];
+  if (n === 3) {
+    if (maxTriArea && triArea3D(V, loop[0], loop[1], loop[2]) > maxTriArea) return [];
+    return [[loop[0], loop[1], loop[2]]];
+  }
+  var nx = 0, ny = 0, nz = 0;
+  for (var i = 0; i < n; i++) {
+    var curr = V[loop[i]];
+    var next = V[loop[(i+1)%n]];
+    nx += (curr[1]-next[1])*(curr[2]+next[2]);
+    ny += (curr[2]-next[2])*(curr[0]+next[0]);
+    nz += (curr[0]-next[0])*(curr[1]+next[1]);
+  }
+  var nLen = Math.sqrt(nx*nx + ny*ny + nz*nz);
+  if (nLen < 1e-15) return fillHoleFan(V, loop, maxTriArea);
+  nx /= nLen; ny /= nLen; nz /= nLen;
+  var ux, uy, uz;
+  if (Math.abs(nz) < 0.9) { ux = ny; uy = -nx; uz = 0; }
+  else { ux = 0; uy = nz; uz = -ny; }
+  var uLen = Math.sqrt(ux*ux + uy*uy + uz*uz);
+  ux /= uLen; uy /= uLen; uz /= uLen;
+  var vx = ny*uz - nz*uy;
+  var vy = nz*ux - nx*uz;
+  var vz = nx*uy - ny*ux;
+  var pts = new Array(n);
+  for (var i = 0; i < n; i++) {
+    var p = V[loop[i]];
+    pts[i] = [p[0]*ux + p[1]*uy + p[2]*uz, p[0]*vx + p[1]*vy + p[2]*vz];
+  }
+  var result = [];
+  var indices = [];
+  for (var i = 0; i < n; i++) indices.push(i);
+  var maxIter = n * n;
+  var iterCount = 0;
+  while (indices.length > 3 && iterCount < maxIter) {
+    iterCount++;
+    var len = indices.length;
+    var earFound = false;
+    for (var i = 0; i < len; i++) {
+      var prevI = (i - 1 + len) % len;
+      var nextI = (i + 1) % len;
+      var pi = indices[prevI], ci = indices[i], ni = indices[nextI];
+      var cross = (pts[ci][0]-pts[pi][0])*(pts[ni][1]-pts[pi][1]) - (pts[ci][1]-pts[pi][1])*(pts[ni][0]-pts[pi][0]);
+      if (cross <= 0) continue;
+      if (maxTriArea && triArea3D(V, loop[pi], loop[ci], loop[ni]) > maxTriArea) continue;
+      var isEar = true;
+      for (var j = 0; j < len; j++) {
+        if (j === prevI || j === i || j === nextI) continue;
+        if (pointInTriangle2D(pts[indices[j]], pts[pi], pts[ci], pts[ni])) { isEar = false; break; }
+      }
+      if (isEar) {
+        result.push([loop[pi], loop[ci], loop[ni]]);
+        indices.splice(i, 1);
+        earFound = true;
+        break;
+      }
+    }
+    if (!earFound) break;
+  }
+  if (indices.length === 3) {
+    if (!maxTriArea || triArea3D(V, loop[indices[0]], loop[indices[1]], loop[indices[2]]) <= maxTriArea) {
+      result.push([loop[indices[0]], loop[indices[1]], loop[indices[2]]]);
+    }
+  } else if (indices.length > 3) {
+    for (var i = 1; i < indices.length - 1; i++) {
+      if (maxTriArea && triArea3D(V, loop[indices[0]], loop[indices[i]], loop[indices[i+1]]) > maxTriArea) continue;
+      result.push([loop[indices[0]], loop[indices[i]], loop[indices[i+1]]]);
+    }
+  }
+  return result;
+}
+
+function fillHoleFan(V, loop, maxTriArea) {
+  var n = loop.length;
+  if (n < 3) return [];
+  if (n === 3) {
+    if (maxTriArea && triArea3D(V, loop[0], loop[1], loop[2]) > maxTriArea) return [];
+    return [[loop[0], loop[1], loop[2]]];
+  }
+  var cx = 0, cy = 0, cz = 0;
+  for (var i = 0; i < n; i++) {
+    cx += V[loop[i]][0]; cy += V[loop[i]][1]; cz += V[loop[i]][2];
+  }
+  V.push([cx/n, cy/n, cz/n]);
+  var ci = V.length - 1;
+  var tris = [];
+  for (var i = 0; i < n; i++) {
+    var tri = [loop[i], loop[(i+1)%n], ci];
+    if (maxTriArea && triArea3D(V, tri[0], tri[1], tri[2]) > maxTriArea) continue;
+    tris.push(tri);
+  }
+  if (tris.length === 0) V.pop();
+  return tris;
+}
+
+function triArea3D(V, a, b, c) {
+  var va=V[a],vb=V[b],vc=V[c];
+  var ex=vb[0]-va[0],ey=vb[1]-va[1],ez=vb[2]-va[2];
+  var fx=vc[0]-va[0],fy=vc[1]-va[1],fz=vc[2]-va[2];
+  var gx=ey*fz-ez*fy,gy=ez*fx-ex*fz,gz=ex*fy-ey*fx;
+  return 0.5*Math.sqrt(gx*gx+gy*gy+gz*gz);
+}
+
+function subdivideLongBoundaryEdges(vertices, triangles, maxTriArea) {
+  var V = vertices, T = triangles, splitCount = 0;
+  for (var pass = 0; pass < 500; pass++) {
+    if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+    var edgeMap = new Map();
+    for (var i = 0; i < T.length; i++) {
+      var ta = T[i][0], tb = T[i][1], tc = T[i][2];
+      var pairs = [[ta,tb],[tb,tc],[tc,ta]];
+      for (var pi = 0; pi < 3; pi++) {
+        var k = undirEdgeKey(pairs[pi][0], pairs[pi][1]);
+        if (!edgeMap.has(k)) edgeMap.set(k, []);
+        edgeMap.get(k).push(i);
+      }
+    }
+    var boundary = getBoundaryEdges(T);
+    if (boundary.length === 0) break;
+    var loops = findAllLoops(boundary);
+    var splitEdgeKey = -1, splitU = -1, splitV = -1;
+    for (var li = 0; li < loops.length; li++) {
+      var loop = loops[li];
+      if (loop.length < 3) continue;
+      var loopArea = 0;
+      for (var j = 1; j < loop.length - 1; j++) loopArea += triArea3D(V, loop[0], loop[j], loop[j+1]);
+      var numEars = loop.length - 2;
+      var estMax = numEars > 0 ? loopArea / numEars * 3 : 0;
+      if (estMax > maxTriArea) {
+        var bestLen = 0;
+        for (var j2 = 0; j2 < loop.length; j2++) {
+          var u = loop[j2], v = loop[(j2 + 1) % loop.length];
+          var dx = V[u][0]-V[v][0], dy = V[u][1]-V[v][1], dz = V[u][2]-V[v][2];
+          var len = dx*dx + dy*dy + dz*dz;
+          if (len > bestLen) { bestLen = len; splitU = u; splitV = v; splitEdgeKey = undirEdgeKey(u, v); }
+        }
+        break;
+      }
+    }
+    if (splitEdgeKey === -1) {
+      var chain = findOpenChain(boundary);
+      if (chain && chain.length >= 3) {
+        var chainArea = 0;
+        for (var j3 = 1; j3 < chain.length - 1; j3++) chainArea += triArea3D(V, chain[0], chain[j3], chain[j3+1]);
+        var numEars2 = chain.length - 2;
+        var estMax2 = numEars2 > 0 ? chainArea / numEars2 * 3 : 0;
+        if (estMax2 > maxTriArea) {
+          var bestLen2 = 0;
+          for (var j4 = 0; j4 < chain.length - 1; j4++) {
+            var u2 = chain[j4], v2 = chain[j4 + 1];
+            var dx2 = V[u2][0]-V[v2][0], dy2 = V[u2][1]-V[v2][1], dz2 = V[u2][2]-V[v2][2];
+            var len2 = dx2*dx2 + dy2*dy2 + dz2*dz2;
+            if (len2 > bestLen2) { bestLen2 = len2; splitU = u2; splitV = v2; splitEdgeKey = undirEdgeKey(u2, v2); }
+          }
+        }
+      }
+    }
+    if (splitEdgeKey === -1) break;
+    var mi = V.length;
+    V.push([(V[splitU][0]+V[splitV][0])/2, (V[splitU][1]+V[splitV][1])/2, (V[splitU][2]+V[splitV][2])/2]);
+    var tris = edgeMap.get(splitEdgeKey) || [];
+    for (var ti = 0; ti < tris.length; ti++) {
+      var triIdx = tris[ti];
+      var tA = T[triIdx][0], tB = T[triIdx][1], tC = T[triIdx][2];
+      var perms = [[tA,tB,tC],[tB,tC,tA],[tC,tA,tB]];
+      for (var pi2 = 0; pi2 < 3; pi2++) {
+        var p0 = perms[pi2][0], p1 = perms[pi2][1], p2 = perms[pi2][2];
+        if ((p0 === splitU && p1 === splitV) || (p0 === splitV && p1 === splitU)) {
+          T[triIdx] = [p0, mi, p2]; T.push([mi, p1, p2]); break;
+        }
+      }
+    }
+    splitCount++;
+  }
+  return { vertices: V, triangles: T, splitCount: splitCount };
+}
+
+function subdivideOversizedTriangles(vertices, triangles, maxTriArea) {
+  var V = vertices;
+  var T = triangles;
+  if (!maxTriArea || maxTriArea <= 0) {
+    var totalA = 0;
+    for (var i = 0; i < T.length; i++) totalA += triArea3D(V, T[i][0], T[i][1], T[i][2]);
+    maxTriArea = T.length > 0 ? (totalA / T.length) * 20 : 1;
+  }
+  var buildEdgeMap = function() {
+    var em = new Map();
+    for (var i = 0; i < T.length; i++) {
+      var a=T[i][0],b=T[i][1],c=T[i][2];
+      var edges = [[a,b],[b,c],[c,a]];
+      for (var j=0;j<3;j++) {
+        var u=edges[j][0],v=edges[j][1];
+        var k = u < v ? u * 1000000 + v : v * 1000000 + u;
+        if (!em.has(k)) em.set(k, []);
+        em.get(k).push(i);
+      }
+    }
+    return em;
+  };
+  var edgeMap = buildEdgeMap();
+  var splitCount = 0;
+  var maxIter = T.length * 3;
+  for (var iter = 0; iter < maxIter; iter++) {
+    if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+    var worstIdx = -1, worstArea = maxTriArea;
+    for (var i = 0; i < T.length; i++) {
+      var area = triArea3D(V, T[i][0], T[i][1], T[i][2]);
+      if (area > worstArea) { worstArea = area; worstIdx = i; }
+    }
+    if (worstIdx === -1) break;
+    var a=T[worstIdx][0],b=T[worstIdx][1],c=T[worstIdx][2];
+    var d2 = function(u, v) {
+      var dx=V[u][0]-V[v][0],dy=V[u][1]-V[v][1],dz=V[u][2]-V[v][2];
+      return dx*dx+dy*dy+dz*dz;
+    };
+    var isBE = function(u, v) {
+      var k = u < v ? u * 1000000 + v : v * 1000000 + u;
+      return (edgeMap.get(k) || []).length === 1;
+    };
+    var candidates = [[a,b,c],[b,c,a],[c,a,b]].filter(function(e){return !isBE(e[0],e[1]);});
+    if (candidates.length === 0) break;
+    var eu,ev,ew,bestDist = -1;
+    for (var ci2=0;ci2<candidates.length;ci2++) {
+      var d = d2(candidates[ci2][0], candidates[ci2][1]);
+      if (d > bestDist) { bestDist = d; eu = candidates[ci2][0]; ev = candidates[ci2][1]; ew = candidates[ci2][2]; }
+    }
+    var mi = V.length;
+    V.push([(V[eu][0]+V[ev][0])/2,(V[eu][1]+V[ev][1])/2,(V[eu][2]+V[ev][2])/2]);
+    T[worstIdx] = [eu, mi, ew];
+    T.push([mi, ev, ew]);
+    var ek = eu < ev ? eu * 1000000 + ev : ev * 1000000 + eu;
+    var neighbors = edgeMap.get(ek) || [];
+    for (var ni = 0; ni < neighbors.length; ni++) {
+      var nIdx = neighbors[ni];
+      if (nIdx === worstIdx) continue;
+      var na=T[nIdx][0],nb=T[nIdx][1],nc=T[nIdx][2];
+      var rotations = [[na,nb,nc],[nb,nc,na],[nc,na,nb]];
+      for (var ri=0;ri<3;ri++) {
+        var p0=rotations[ri][0],p1=rotations[ri][1],p2=rotations[ri][2];
+        if (p0===ev && p1===eu) {
+          T[nIdx] = [ev, mi, p2];
+          T.push([mi, eu, p2]);
+          break;
+        }
+        if (p0===eu && p1===ev) {
+          T[nIdx] = [eu, mi, p2];
+          T.push([mi, ev, p2]);
+          break;
+        }
+      }
+    }
+    splitCount++;
+    edgeMap = buildEdgeMap();
+  }
+  return { vertices: V, triangles: T, splitCount: splitCount };
+}
+
+function averageEdgeLength(V, T) {
+  var totalLen = 0, count = 0;
+  for (var i = 0; i < T.length; i++) {
+    var a=T[i][0],b=T[i][1],c=T[i][2];
+    var edges=[[a,b],[b,c],[c,a]];
+    for (var e = 0; e < 3; e++) {
+      var u=edges[e][0],v=edges[e][1];
+      var dx=V[u][0]-V[v][0],dy=V[u][1]-V[v][1],dz=V[u][2]-V[v][2];
+      totalLen+=Math.sqrt(dx*dx+dy*dy+dz*dz); count++;
+    }
+  }
+  return count > 0 ? totalLen / count : 1;
+}
+
+// ===== 適応的パラメータ =====
+function analyzeScale(V, T) {
+  var minX = Infinity, maxX = -Infinity;
+  var minY = Infinity, maxY = -Infinity;
+  var minZ = Infinity, maxZ = -Infinity;
+  for (var i = 0; i < V.length; i++) {
+    var v = V[i];
+    if (v[0] < minX) minX = v[0]; if (v[0] > maxX) maxX = v[0];
+    if (v[1] < minY) minY = v[1]; if (v[1] > maxY) maxY = v[1];
+    if (v[2] < minZ) minZ = v[2]; if (v[2] > maxZ) maxZ = v[2];
+  }
+  var dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+  var bboxDiag = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  var totalArea = 0;
+  var edgeLens = [];
+  var seen = new Set();
+  for (var i = 0; i < T.length; i++) {
+    totalArea += triArea3D(V, T[i][0], T[i][1], T[i][2]);
+    var a = T[i][0], b = T[i][1], c = T[i][2];
+    var pairs = [[a,b],[b,c],[c,a]];
+    for (var j = 0; j < 3; j++) {
+      var u = pairs[j][0], v2 = pairs[j][1];
+      var k = undirEdgeKey(u, v2);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      var ex = V[u][0]-V[v2][0], ey = V[u][1]-V[v2][1], ez = V[u][2]-V[v2][2];
+      edgeLens.push(Math.sqrt(ex*ex+ey*ey+ez*ez));
+    }
+  }
+  edgeLens.sort(function(a,b){return a-b;});
+  var medianEdge = edgeLens.length > 0 ? edgeLens[Math.floor(edgeLens.length/2)] : 1;
+  var avgArea = T.length > 0 ? totalArea / T.length : 1;
+  return { bboxDiag: bboxDiag, medianEdge: medianEdge, avgArea: avgArea, totalArea: totalArea, triCount: T.length };
+}
+
+// ===== Deep Repair (ボクセル再構築) =====
+
+function pointToTriangleDistance(p, V, a, b, c) {
+  var v0 = V[a], v1 = V[b], v2 = V[c];
+  var e0x = v1[0]-v0[0], e0y = v1[1]-v0[1], e0z = v1[2]-v0[2];
+  var e1x = v2[0]-v0[0], e1y = v2[1]-v0[1], e1z = v2[2]-v0[2];
+  var vx = v0[0]-p[0], vy = v0[1]-p[1], vz = v0[2]-p[2];
+  var a00 = e0x*e0x+e0y*e0y+e0z*e0z;
+  var a01 = e0x*e1x+e0y*e1y+e0z*e1z;
+  var a11 = e1x*e1x+e1y*e1y+e1z*e1z;
+  var b0 = e0x*vx+e0y*vy+e0z*vz;
+  var b1 = e1x*vx+e1y*vy+e1z*vz;
+  var det = a00*a11-a01*a01;
+  var s = a01*b1-a11*b0;
+  var t = a01*b0-a00*b1;
+  if (s+t <= det) {
+    if (s < 0) {
+      if (t < 0) {
+        if (b0 < 0) { t = 0; s = -b0 >= a00 ? 1 : -b0/a00; }
+        else { s = 0; t = b1 >= 0 ? 0 : (-b1 >= a11 ? 1 : -b1/a11); }
+      } else { s = 0; t = b1 >= 0 ? 0 : (-b1 >= a11 ? 1 : -b1/a11); }
+    } else if (t < 0) {
+      t = 0; s = b0 >= 0 ? 0 : (-b0 >= a00 ? 1 : -b0/a00);
+    } else {
+      var invDet = det > 1e-30 ? 1/det : 0;
+      s *= invDet; t *= invDet;
+    }
+  } else {
+    if (s < 0) {
+      var tmp0 = a01+b0, tmp1 = a11+b1;
+      if (tmp1 > tmp0) {
+        var numer = tmp1-tmp0, denom = a00-2*a01+a11;
+        s = numer >= denom ? 1 : numer/denom; t = 1-s;
+      } else { s = 0; t = tmp1 <= 0 ? 1 : (b1 >= 0 ? 0 : -b1/a11); }
+    } else if (t < 0) {
+      var tmp0b = a01+b1, tmp1b = a00+b0;
+      if (tmp1b > tmp0b) {
+        var numerb = tmp1b-tmp0b, denomb = a00-2*a01+a11;
+        t = numerb >= denomb ? 1 : numerb/denomb; s = 1-t;
+      } else { t = 0; s = tmp1b <= 0 ? 1 : (b0 >= 0 ? 0 : -b0/a00); }
+    } else {
+      var numer1 = (a11+b1)-(a01+b0);
+      if (numer1 <= 0) { s = 0; t = 1; }
+      else { var denom1 = a00-2*a01+a11; s = numer1 >= denom1 ? 1 : numer1/denom1; t = 1-s; }
+    }
+  }
+  var cx = v0[0]+s*e0x+t*e1x;
+  var cy = v0[1]+s*e0y+t*e1y;
+  var cz = v0[2]+s*e0z+t*e1z;
+  var dx = p[0]-cx, dy = p[1]-cy, dz = p[2]-cz;
+  return { distance: Math.sqrt(dx*dx+dy*dy+dz*dz), closest: [cx, cy, cz] };
+}
+
+function rayTriangleIntersect(origin, dir, V, a, b, c) {
+  var v0 = V[a], v1 = V[b], v2 = V[c];
+  var e1x = v1[0]-v0[0], e1y = v1[1]-v0[1], e1z = v1[2]-v0[2];
+  var e2x = v2[0]-v0[0], e2y = v2[1]-v0[1], e2z = v2[2]-v0[2];
+  var hx = dir[1]*e2z-dir[2]*e2y;
+  var hy = dir[2]*e2x-dir[0]*e2z;
+  var hz = dir[0]*e2y-dir[1]*e2x;
+  var det = e1x*hx+e1y*hy+e1z*hz;
+  if (det > -1e-12 && det < 1e-12) return null;
+  var invDet = 1/det;
+  var sx = origin[0]-v0[0], sy = origin[1]-v0[1], sz = origin[2]-v0[2];
+  var u = invDet*(sx*hx+sy*hy+sz*hz);
+  if (u < -1e-8 || u > 1+1e-8) return null;
+  var qx = sy*e1z-sz*e1y, qy = sz*e1x-sx*e1z, qz = sx*e1y-sy*e1x;
+  var v = invDet*(dir[0]*qx+dir[1]*qy+dir[2]*qz);
+  if (v < -1e-8 || u+v > 1+1e-8) return null;
+  var t = invDet*(e2x*qx+e2y*qy+e2z*qz);
+  return { t: t, u: u, v: v };
+}
+
+function findNearestTriangle(point, V, T, bvh) {
+  var bestDist = Infinity, bestTri = -1, bestClosest = null;
+  var radius = bvh.root ? (bvh.root.box[3]-bvh.root.box[0])*0.01 : 1;
+  for (var attempt = 0; attempt < 20; attempt++) {
+    var qbox = [
+      point[0]-radius, point[1]-radius, point[2]-radius,
+      point[0]+radius, point[1]+radius, point[2]+radius
+    ];
+    var candidates = bvhQuery(bvh.root, qbox);
+    for (var ci = 0; ci < candidates.length; ci++) {
+      var ti = candidates[ci];
+      var d = pointToTriangleDistance(point, V, T[ti][0], T[ti][1], T[ti][2]);
+      if (d.distance < bestDist) { bestDist = d.distance; bestTri = ti; bestClosest = d.closest; }
+    }
+    if (bestTri >= 0) break;
+    radius *= 4;
+  }
+  if (bestTri < 0) {
+    for (var i = 0; i < T.length; i++) {
+      var d = pointToTriangleDistance(point, V, T[i][0], T[i][1], T[i][2]);
+      if (d.distance < bestDist) { bestDist = d.distance; bestTri = i; bestClosest = d.closest; }
+    }
+  }
+  return { triIndex: bestTri, distance: bestDist, closest: bestClosest };
+}
+
+function selectVoxelResolution(scale, userResolution) {
+  if (typeof userResolution === 'number') return Math.max(32, Math.min(512, userResolution));
+  var target = scale.bboxDiag / (scale.medianEdge * 0.5);
+  return Math.max(64, Math.min(256, Math.round(target)));
+}
+
+function voxelizeToSDF(V, T, resolution, progress) {
+  var minX = Infinity, minY = Infinity, minZ = Infinity;
+  var maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (var i = 0; i < V.length; i++) {
+    var v = V[i];
+    if (v[0] < minX) minX = v[0]; if (v[0] > maxX) maxX = v[0];
+    if (v[1] < minY) minY = v[1]; if (v[1] > maxY) maxY = v[1];
+    if (v[2] < minZ) minZ = v[2]; if (v[2] > maxZ) maxZ = v[2];
+  }
+  var sizeX = maxX-minX, sizeY = maxY-minY, sizeZ = maxZ-minZ;
+  var maxSize = Math.max(sizeX, sizeY, sizeZ);
+  if (maxSize < 1e-10) return null;
+  var voxelSize = maxSize / (resolution - 4);
+  var padding = 2 * voxelSize;
+  var origin = [minX-padding, minY-padding, minZ-padding];
+  var resX = Math.ceil((sizeX+2*padding)/voxelSize);
+  var resY = Math.ceil((sizeY+2*padding)/voxelSize);
+  var resZ = Math.ceil((sizeZ+2*padding)/voxelSize);
+  var grid = new Float32Array(resX*resY*resZ);
+  var bvh = buildBVH(V, T);
+  var reportInterval = Math.max(1, Math.floor(resZ/10));
+
+  // Pass 1: 符号なし距離
+  progress('SDF構築中... (距離計算)');
+  for (var k = 0; k < resZ; k++) {
+    if (k % reportInterval === 0) progress('SDF構築中... ' + Math.floor(40*k/resZ) + '%');
+    for (var j = 0; j < resY; j++) {
+      for (var i = 0; i < resX; i++) {
+        var point = [origin[0]+i*voxelSize, origin[1]+j*voxelSize, origin[2]+k*voxelSize];
+        var nearest = findNearestTriangle(point, V, T, bvh);
+        grid[i+j*resX+k*resX*resY] = nearest.distance;
+      }
+    }
+  }
+
+  // Pass 2: 3軸レイキャスティング多数決
+  progress('SDF構築中... (符号判定)');
+  var signVotes = new Int8Array(resX*resY*resZ);
+  var resArr = [resX, resY, resZ];
+  var dirs = [[1,0,0],[0,1,0],[0,0,1]];
+  var jitterEps = voxelSize * 1e-4;
+
+  for (var ax = 0; ax < 3; ax++) {
+    if (ax > 0) progress('SDF構築中... ' + (40+Math.floor(20*ax)) + '%');
+    var dir = dirs[ax];
+    var pAxis = ax;
+    var s1Axis = (ax+1)%3;
+    var s2Axis = (ax+2)%3;
+    var resPrimary = resArr[pAxis];
+    var resS1 = resArr[s1Axis];
+    var resS2 = resArr[s2Axis];
+
+    for (var b = 0; b < resS2; b++) {
+      for (var a = 0; a < resS1; a++) {
+        var rayOrig = [0, 0, 0];
+        rayOrig[pAxis] = origin[pAxis] - voxelSize;
+        rayOrig[s1Axis] = origin[s1Axis] + a*voxelSize + jitterEps;
+        rayOrig[s2Axis] = origin[s2Axis] + b*voxelSize + jitterEps;
+
+        var hits = [];
+        for (var ti = 0; ti < T.length; ti++) {
+          var hit = rayTriangleIntersect(rayOrig, dir, V, T[ti][0], T[ti][1], T[ti][2]);
+          if (hit && hit.t > 0) hits.push(hit.t);
+        }
+        hits.sort(function(x,y){return x-y;});
+
+        var uniqueHits = [];
+        for (var h = 0; h < hits.length; h++) {
+          if (h === 0 || hits[h]-hits[h-1] > voxelSize*0.01) uniqueHits.push(hits[h]);
+        }
+
+        var hitIdx = 0;
+        var inside = false;
+        for (var p = 0; p < resPrimary; p++) {
+          var voxelDist = origin[pAxis]+p*voxelSize-rayOrig[pAxis];
+          while (hitIdx < uniqueHits.length && uniqueHits[hitIdx] < voxelDist) {
+            inside = !inside; hitIdx++;
+          }
+          if (inside) {
+            var coords = [0, 0, 0];
+            coords[pAxis] = p; coords[s1Axis] = a; coords[s2Axis] = b;
+            signVotes[coords[0]+coords[1]*resX+coords[2]*resX*resY]++;
+          }
+        }
+      }
+    }
+  }
+
+  progress('SDF構築中... 90%');
+  for (var idx = 0; idx < grid.length; idx++) {
+    if (signVotes[idx] >= 2) grid[idx] = -grid[idx];
+  }
+
+  return { data: grid, resX: resX, resY: resY, resZ: resZ, origin: origin, voxelSize: voxelSize };
+}
+
+function marchingCubes(sdf) {
+  var data = sdf.data, resX = sdf.resX, resY = sdf.resY, resZ = sdf.resZ;
+  var origin = sdf.origin, voxelSize = sdf.voxelSize;
+  var V = [], T = [];
+  var edgeVertexCache = new Map();
+
+  var edgeTable = [
+    0x0,0x109,0x203,0x30a,0x406,0x50f,0x605,0x70c,0x80c,0x905,0xa0f,0xb06,0xc0a,0xd03,0xe09,0xf00,
+    0x190,0x99,0x393,0x29a,0x596,0x49f,0x795,0x69c,0x99c,0x895,0xb9f,0xa96,0xd9a,0xc93,0xf99,0xe90,
+    0x230,0x339,0x33,0x13a,0x636,0x73f,0x435,0x53c,0xa3c,0xb35,0x83f,0x936,0xe3a,0xf33,0xc39,0xd30,
+    0x3a0,0x2a9,0x1a3,0xaa,0x7a6,0x6af,0x5a5,0x4ac,0xbac,0xaa5,0x9af,0x8a6,0xfaa,0xea3,0xda9,0xca0,
+    0x460,0x569,0x663,0x76a,0x66,0x16f,0x265,0x36c,0xc6c,0xd65,0xe6f,0xf66,0x86a,0x963,0xa69,0xb60,
+    0x5f0,0x4f9,0x7f3,0x6fa,0x1f6,0xff,0x3f5,0x2fc,0xdfc,0xcf5,0xfff,0xef6,0x9fa,0x8f3,0xbf9,0xaf0,
+    0x650,0x759,0x453,0x55a,0x256,0x35f,0x55,0x15c,0xe5c,0xf55,0xc5f,0xd56,0xa5a,0xb53,0x859,0x950,
+    0x7c0,0x6c9,0x5c3,0x4ca,0x3c6,0x2cf,0x1c5,0xcc,0xfcc,0xec5,0xdcf,0xcc6,0xbca,0xac3,0x9c9,0x8c0,
+    0x8c0,0x9c9,0xac3,0xbca,0xcc6,0xdcf,0xec5,0xfcc,0xcc,0x1c5,0x2cf,0x3c6,0x4ca,0x5c3,0x6c9,0x7c0,
+    0x950,0x859,0xb53,0xa5a,0xd56,0xc5f,0xf55,0xe5c,0x15c,0x55,0x35f,0x256,0x55a,0x453,0x759,0x650,
+    0xaf0,0xbf9,0x8f3,0x9fa,0xef6,0xfff,0xcf5,0xdfc,0x2fc,0x3f5,0xff,0x1f6,0x6fa,0x7f3,0x4f9,0x5f0,
+    0xb60,0xa69,0x963,0x86a,0xf66,0xe6f,0xd65,0xc6c,0x36c,0x265,0x16f,0x66,0x76a,0x663,0x569,0x460,
+    0xca0,0xda9,0xea3,0xfaa,0x8a6,0x9af,0xaa5,0xbac,0x4ac,0x5a5,0x6af,0x7a6,0xaa,0x1a3,0x2a9,0x3a0,
+    0xd30,0xc39,0xf33,0xe3a,0x936,0x83f,0xb35,0xa3c,0x53c,0x435,0x73f,0x636,0x13a,0x33,0x339,0x230,
+    0xe90,0xf99,0xc93,0xd9a,0xa96,0xb9f,0x895,0x99c,0x69c,0x795,0x49f,0x596,0x29a,0x393,0x99,0x190,
+    0xf00,0xe09,0xd03,0xc0a,0xb06,0xa0f,0x905,0x80c,0x70c,0x605,0x50f,0x406,0x30a,0x203,0x109,0x0
+  ];
+
+  var triTable = [];
+  for (var ti = 0; ti < 256; ti++) triTable.push([-1]);
+  var triTableData = '-1|0,8,3,-1|0,1,9,-1|1,8,3,9,8,1,-1|1,2,10,-1|0,8,3,1,2,10,-1|9,2,10,0,2,9,-1|2,8,3,2,10,8,10,9,8,-1|3,11,2,-1|0,11,2,8,11,0,-1|1,9,0,2,3,11,-1|1,11,2,1,9,11,9,8,11,-1|3,10,1,11,10,3,-1|0,10,1,0,8,10,8,11,10,-1|3,9,0,3,11,9,11,10,9,-1|9,8,10,10,8,11,-1|4,7,8,-1|4,3,0,7,3,4,-1|0,1,9,8,4,7,-1|4,1,9,4,7,1,7,3,1,-1|1,2,10,8,4,7,-1|3,4,7,3,0,4,1,2,10,-1|9,2,10,9,0,2,8,4,7,-1|2,10,9,2,9,7,2,7,3,7,9,4,-1|8,4,7,3,11,2,-1|11,4,7,11,2,4,2,0,4,-1|9,0,1,8,4,7,2,3,11,-1|4,7,11,9,4,11,9,11,2,9,2,1,-1|3,10,1,3,11,10,7,8,4,-1|1,11,10,1,4,11,1,0,4,7,11,4,-1|4,7,8,9,0,11,9,11,10,11,0,3,-1|4,7,11,4,11,9,9,11,10,-1|9,5,4,-1|9,5,4,0,8,3,-1|0,5,4,1,5,0,-1|8,5,4,8,3,5,3,1,5,-1|1,2,10,9,5,4,-1|3,0,8,1,2,10,4,9,5,-1|5,2,10,5,4,2,4,0,2,-1|2,10,5,3,2,5,3,5,4,3,4,8,-1|9,5,4,2,3,11,-1|0,11,2,0,8,11,4,9,5,-1|0,5,4,0,1,5,2,3,11,-1|2,1,5,2,5,8,2,8,11,4,8,5,-1|10,3,11,10,1,3,9,5,4,-1|4,9,5,0,8,1,8,10,1,8,11,10,-1|5,4,0,5,0,11,5,11,10,11,0,3,-1|5,4,8,5,8,10,10,8,11,-1|9,7,8,5,7,9,-1|9,3,0,9,5,3,5,7,3,-1|0,7,8,0,1,7,1,5,7,-1|1,5,3,3,5,7,-1|9,7,8,9,5,7,10,1,2,-1|10,1,2,9,5,0,5,3,0,5,7,3,-1|8,0,2,8,2,5,8,5,7,10,5,2,-1|2,10,5,2,5,3,3,5,7,-1|7,9,5,7,8,9,3,11,2,-1|9,5,7,9,7,2,9,2,0,2,7,11,-1|2,3,11,0,1,8,1,7,8,1,5,7,-1|11,2,1,11,1,7,7,1,5,-1|9,5,8,8,5,7,10,1,3,10,3,11,-1|5,7,0,5,0,9,7,11,0,1,0,10,11,10,0,-1|11,10,0,11,0,3,10,5,0,8,0,7,5,7,0,-1|11,10,5,7,11,5,-1|10,6,5,-1|0,8,3,5,10,6,-1|9,0,1,5,10,6,-1|1,8,3,1,9,8,5,10,6,-1|1,6,5,2,6,1,-1|1,6,5,1,2,6,3,0,8,-1|9,6,5,9,0,6,0,2,6,-1|5,9,8,5,8,2,5,2,6,3,2,8,-1|2,3,11,10,6,5,-1|11,0,8,11,2,0,10,6,5,-1|0,1,9,2,3,11,5,10,6,-1|5,10,6,1,9,2,9,11,2,9,8,11,-1|6,3,11,6,5,3,5,1,3,-1|0,8,11,0,11,5,0,5,1,5,11,6,-1|3,11,6,0,3,6,0,6,5,0,5,9,-1|6,5,9,6,9,11,11,9,8,-1|5,10,6,4,7,8,-1|4,3,0,4,7,3,6,5,10,-1|1,9,0,5,10,6,8,4,7,-1|10,6,5,1,9,7,1,7,3,7,9,4,-1|6,1,2,6,5,1,4,7,8,-1|1,2,5,5,2,6,3,0,4,3,4,7,-1|8,4,7,9,0,5,0,6,5,0,2,6,-1|7,3,9,7,9,4,3,2,9,5,9,6,2,6,9,-1|3,11,2,7,8,4,10,6,5,-1|5,10,6,4,7,2,4,2,0,2,7,11,-1|0,1,9,4,7,8,2,3,11,5,10,6,-1|9,2,1,9,11,2,9,4,11,7,11,4,5,10,6,-1|8,4,7,3,11,5,3,5,1,5,11,6,-1|5,1,11,5,11,6,1,0,11,7,11,4,0,4,11,-1|0,5,9,0,6,5,0,3,6,11,6,3,8,4,7,-1|6,5,9,6,9,11,4,7,9,7,11,9,-1|10,4,9,6,4,10,-1|4,10,6,4,9,10,0,8,3,-1|10,0,1,10,6,0,6,4,0,-1|8,3,1,8,1,6,8,6,4,6,1,10,-1|1,4,9,1,2,4,2,6,4,-1|3,0,8,1,2,9,2,4,9,2,6,4,-1|0,2,4,4,2,6,-1|8,3,2,8,2,4,4,2,6,-1|10,4,9,10,6,4,11,2,3,-1|0,8,2,2,8,11,4,9,10,4,10,6,-1|3,11,2,0,1,6,0,6,4,6,1,10,-1|6,4,1,6,1,10,4,8,1,2,1,11,8,11,1,-1|9,6,4,9,3,6,9,1,3,11,6,3,-1|8,11,1,8,1,0,11,6,1,9,1,4,6,4,1,-1|3,11,6,3,6,0,0,6,4,-1|6,4,8,11,6,8,-1|7,10,6,7,8,10,8,9,10,-1|0,7,3,0,10,7,0,9,10,6,7,10,-1|10,6,7,1,10,7,1,7,8,1,8,0,-1|10,6,7,10,7,1,1,7,3,-1|1,2,6,1,6,8,1,8,9,8,6,7,-1|2,6,9,2,9,1,6,7,9,0,9,3,7,3,9,-1|7,8,0,7,0,6,6,0,2,-1|7,3,2,6,7,2,-1|2,3,11,10,6,8,10,8,9,8,6,7,-1|2,0,7,2,7,11,0,9,7,6,7,10,9,10,7,-1|1,8,0,1,7,8,1,10,7,6,7,10,2,3,11,-1|11,2,1,11,1,7,10,6,1,6,7,1,-1|8,9,6,8,6,7,9,1,6,11,6,3,1,3,6,-1|0,9,1,11,6,7,-1|7,8,0,7,0,6,3,11,0,11,6,0,-1|7,11,6,-1|7,6,11,-1|3,0,8,11,7,6,-1|0,1,9,11,7,6,-1|8,1,9,8,3,1,11,7,6,-1|10,1,2,6,11,7,-1|1,2,10,3,0,8,6,11,7,-1|2,9,0,2,10,9,6,11,7,-1|6,11,7,2,10,3,10,8,3,10,9,8,-1|7,2,3,6,2,7,-1|7,0,8,7,6,0,6,2,0,-1|2,7,6,2,3,7,0,1,9,-1|1,6,2,1,8,6,1,9,8,8,7,6,-1|10,7,6,10,1,7,1,3,7,-1|10,7,6,1,7,10,1,8,7,1,0,8,-1|0,3,7,0,7,10,0,10,9,6,10,7,-1|7,6,10,7,10,8,8,10,9,-1|6,8,4,11,8,6,-1|3,6,11,3,0,6,0,4,6,-1|8,6,11,8,4,6,9,0,1,-1|9,4,6,9,6,3,9,3,1,11,3,6,-1|6,8,4,6,11,8,2,10,1,-1|1,2,10,3,0,11,0,6,11,0,4,6,-1|4,11,8,4,6,11,0,2,9,2,10,9,-1|10,9,3,10,3,2,9,4,3,11,3,6,4,6,3,-1|8,2,3,8,4,2,4,6,2,-1|0,4,2,4,6,2,-1|1,9,0,2,3,4,2,4,6,4,3,8,-1|1,9,4,1,4,2,2,4,6,-1|8,1,3,8,6,1,8,4,6,6,10,1,-1|10,1,0,10,0,6,6,0,4,-1|4,6,3,4,3,8,6,10,3,0,3,9,10,9,3,-1|10,9,4,6,10,4,-1|4,9,5,7,6,11,-1|0,8,3,4,9,5,11,7,6,-1|5,0,1,5,4,0,7,6,11,-1|11,7,6,8,3,4,3,5,4,3,1,5,-1|9,5,4,10,1,2,7,6,11,-1|6,11,7,1,2,10,0,8,3,4,9,5,-1|7,6,11,5,4,10,4,2,10,4,0,2,-1|3,4,8,3,5,4,3,2,5,10,5,2,11,7,6,-1|7,2,3,7,6,2,5,4,9,-1|9,5,4,0,8,6,0,6,2,6,8,7,-1|3,6,2,3,7,6,1,5,0,5,4,0,-1|6,2,8,6,8,7,2,1,8,4,8,5,1,5,8,-1|9,5,4,10,1,6,1,7,6,1,3,7,-1|1,6,10,1,7,6,1,0,7,8,7,0,9,5,4,-1|4,0,10,4,10,5,0,3,10,6,10,7,3,7,10,-1|7,6,10,7,10,8,5,4,10,4,8,10,-1|6,9,5,6,11,9,11,8,9,-1|3,6,11,0,6,3,0,5,6,0,9,5,-1|0,11,8,0,5,11,0,1,5,5,6,11,-1|6,11,3,6,3,5,5,3,1,-1|1,2,10,9,5,11,9,11,8,11,5,6,-1|0,11,3,0,6,11,0,9,6,5,6,9,1,2,10,-1|11,8,5,11,5,6,8,0,5,10,5,2,0,2,5,-1|6,11,3,6,3,5,2,10,3,10,5,3,-1|5,8,9,5,2,8,5,6,2,3,8,2,-1|9,5,6,9,6,0,0,6,2,-1|1,5,8,1,8,0,5,6,8,3,8,2,6,2,8,-1|1,5,6,2,1,6,-1|1,3,6,1,6,10,3,8,6,5,6,9,8,9,6,-1|10,1,0,10,0,6,9,5,0,5,6,0,-1|0,3,8,5,6,10,-1|10,5,6,-1|11,5,10,7,5,11,-1|11,5,10,11,7,5,8,3,0,-1|5,11,7,5,10,11,1,9,0,-1|10,7,5,10,11,7,9,8,1,8,3,1,-1|11,1,2,11,7,1,7,5,1,-1|0,8,3,1,2,7,1,7,5,7,2,11,-1|9,7,5,9,2,7,9,0,2,2,11,7,-1|7,5,2,7,2,11,5,9,2,3,2,8,9,8,2,-1|2,5,10,2,3,5,3,7,5,-1|8,2,0,8,5,2,8,7,5,10,2,5,-1|9,0,1,5,10,3,5,3,7,3,10,2,-1|9,8,2,9,2,1,8,7,2,10,2,5,7,5,2,-1|1,3,5,3,7,5,-1|0,8,7,0,7,1,1,7,5,-1|9,0,3,9,3,5,5,3,7,-1|9,8,7,5,9,7,-1|5,8,4,5,10,8,10,11,8,-1|5,0,4,5,11,0,5,10,11,11,3,0,-1|0,1,9,8,4,10,8,10,11,10,4,5,-1|10,11,4,10,4,5,11,3,4,9,4,1,3,1,4,-1|2,5,1,2,8,5,2,11,8,4,5,8,-1|0,4,11,0,11,3,4,5,11,2,11,1,5,1,11,-1|0,2,5,0,5,9,2,11,5,4,5,8,11,8,5,-1|9,4,5,2,11,3,-1|2,5,10,3,5,2,3,4,5,3,8,4,-1|5,10,2,5,2,4,4,2,0,-1|3,10,2,3,5,10,3,8,5,4,5,8,0,1,9,-1|5,10,2,5,2,4,1,9,2,9,4,2,-1|8,4,5,8,5,3,3,5,1,-1|0,4,5,1,0,5,-1|8,4,5,8,5,3,9,0,5,0,3,5,-1|9,4,5,-1|4,11,7,4,9,11,9,10,11,-1|0,8,3,4,9,7,9,11,7,9,10,11,-1|1,10,11,1,11,4,1,4,0,7,4,11,-1|3,1,4,3,4,8,1,10,4,7,4,11,10,11,4,-1|4,11,7,9,11,4,9,2,11,9,1,2,-1|9,7,4,9,11,7,9,1,11,2,11,1,0,8,3,-1|11,7,4,11,4,2,2,4,0,-1|11,7,4,11,4,2,8,3,4,3,2,4,-1|2,9,10,2,7,9,2,3,7,7,4,9,-1|9,10,7,9,7,4,10,2,7,0,7,8,2,8,7,-1|3,7,10,3,10,2,7,4,10,1,10,0,4,0,10,-1|1,10,2,8,7,4,-1|4,9,1,4,1,7,7,1,3,-1|4,9,1,4,1,7,0,8,1,8,7,1,-1|4,0,3,7,4,3,-1|4,8,7,-1|9,10,8,10,11,8,-1|3,0,9,3,9,11,11,9,10,-1|0,1,10,0,10,8,8,10,11,-1|3,1,10,11,3,10,-1|1,2,11,1,11,9,9,11,8,-1|3,0,9,3,9,11,1,2,9,2,11,9,-1|0,2,11,8,0,11,-1|3,2,11,-1|2,3,8,2,8,10,10,8,9,-1|9,10,2,0,9,2,-1|2,3,8,2,8,10,0,1,8,1,10,8,-1|1,10,2,-1|1,3,8,9,1,8,-1|0,9,1,-1|0,3,8,-1|-1';
+  var triTableRows = triTableData.split('|');
+  for (var i = 0; i < 256; i++) {
+    triTable[i] = triTableRows[i].split(',').map(Number);
+  }
+
+  var edgeCorners = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  var cornerOffsets = [[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1]];
+
+  var stride = (resY+1)*(resZ+1);
+  var getEdgeVertex = function(i, j, k, edgeIdx) {
+    var ec = edgeCorners[edgeIdx];
+    var c0 = ec[0], c1 = ec[1];
+    var gi0 = i+cornerOffsets[c0][0], gj0 = j+cornerOffsets[c0][1], gk0 = k+cornerOffsets[c0][2];
+    var gi1 = i+cornerOffsets[c1][0], gj1 = j+cornerOffsets[c1][1], gk1 = k+cornerOffsets[c1][2];
+    var mi = Math.min(gi0,gi1), mj = Math.min(gj0,gj1), mk = Math.min(gk0,gk1);
+    var axis = (gi0 !== gi1) ? 0 : ((gj0 !== gj1) ? 1 : 2);
+    var key = (mi*stride+mj*(resZ+1)+mk)*3+axis;
+    if (edgeVertexCache.has(key)) return edgeVertexCache.get(key);
+    var v0 = data[gi0+gj0*resX+gk0*resX*resY];
+    var v1 = data[gi1+gj1*resX+gk1*resX*resY];
+    var t = 0.5;
+    if (Math.abs(v1-v0) > 1e-10) t = Math.max(0, Math.min(1, -v0/(v1-v0)));
+    var vi = V.length;
+    V.push([
+      origin[0]+(gi0+t*(gi1-gi0))*voxelSize,
+      origin[1]+(gj0+t*(gj1-gj0))*voxelSize,
+      origin[2]+(gk0+t*(gk1-gk0))*voxelSize
+    ]);
+    edgeVertexCache.set(key, vi);
+    return vi;
+  };
+
+  for (var k = 0; k < resZ-1; k++) {
+    for (var j = 0; j < resY-1; j++) {
+      for (var i = 0; i < resX-1; i++) {
+        var cubeIndex = 0;
+        var vals = new Array(8);
+        for (var c = 0; c < 8; c++) {
+          var ci = i+cornerOffsets[c][0], cj = j+cornerOffsets[c][1], ck = k+cornerOffsets[c][2];
+          vals[c] = data[ci+cj*resX+ck*resX*resY];
+          if (vals[c] < 0) cubeIndex |= (1 << c);
+        }
+        if (cubeIndex === 0 || cubeIndex === 255) continue;
+        var edges = edgeTable[cubeIndex];
+        if (edges === 0) continue;
+        var row = triTable[cubeIndex];
+        for (var t = 0; row[t] !== -1; t += 3) {
+          var v0 = getEdgeVertex(i, j, k, row[t]);
+          var v1 = getEdgeVertex(i, j, k, row[t+1]);
+          var v2 = getEdgeVertex(i, j, k, row[t+2]);
+          if (v0 !== v1 && v1 !== v2 && v2 !== v0) T.push([v0, v1, v2]);
+        }
+      }
+    }
+  }
+  return { V: V, T: T };
+}
+
+function laplacianSmooth(V, T, iterations, lambda) {
+  var adj = new Array(V.length);
+  for (var i = 0; i < V.length; i++) adj[i] = [];
+  for (var i = 0; i < T.length; i++) {
+    var a = T[i][0], b = T[i][1], c = T[i][2];
+    if (adj[a].indexOf(b) < 0) adj[a].push(b);
+    if (adj[a].indexOf(c) < 0) adj[a].push(c);
+    if (adj[b].indexOf(a) < 0) adj[b].push(a);
+    if (adj[b].indexOf(c) < 0) adj[b].push(c);
+    if (adj[c].indexOf(a) < 0) adj[c].push(a);
+    if (adj[c].indexOf(b) < 0) adj[c].push(b);
+  }
+  var verts = V;
+  for (var iter = 0; iter < iterations; iter++) {
+    var newV = new Array(verts.length);
+    for (var i = 0; i < verts.length; i++) {
+      var neighbors = adj[i];
+      if (neighbors.length === 0) { newV[i] = [verts[i][0], verts[i][1], verts[i][2]]; continue; }
+      var ax = 0, ay = 0, az = 0;
+      for (var j = 0; j < neighbors.length; j++) {
+        ax += verts[neighbors[j]][0]; ay += verts[neighbors[j]][1]; az += verts[neighbors[j]][2];
+      }
+      ax /= neighbors.length; ay /= neighbors.length; az /= neighbors.length;
+      newV[i] = [
+        verts[i][0]+lambda*(ax-verts[i][0]),
+        verts[i][1]+lambda*(ay-verts[i][1]),
+        verts[i][2]+lambda*(az-verts[i][2])
+      ];
+    }
+    verts = newV;
+  }
+  return verts;
+}
+
+function projectToOriginalSurface(newV, originalV, originalT, bvh, maxDist) {
+  var projected = new Array(newV.length);
+  for (var i = 0; i < newV.length; i++) {
+    var nearest = findNearestTriangle(newV[i], originalV, originalT, bvh);
+    if (nearest.distance <= maxDist && nearest.closest) {
+      projected[i] = nearest.closest;
+    } else {
+      projected[i] = [newV[i][0], newV[i][1], newV[i][2]];
+    }
+  }
+  return projected;
+}
+
+function repairViaVoxelReconstruction(V, T, progress, opts) {
+  var scale = opts.scale || analyzeScale(V, T);
+  var resolution = selectVoxelResolution(scale, opts.voxelResolution || 'auto');
+  progress('ボクセル再構築中 (解像度: ' + resolution + ')...');
+
+  var sdf = voxelizeToSDF(V, T, resolution, progress);
+  if (!sdf) return { V: V, T: T, resolution: 0 };
+
+  if (sdf.resX < 8 || sdf.resY < 8 || sdf.resZ < 8) {
+    progress('Deep Repair スキップ: ジオメトリが薄すぎます');
+    sdf.data = null;
+    return { V: V, T: T, resolution: 0 };
+  }
+
+  progress('マーチングキューブ実行中...');
+  var mc = marchingCubes(sdf);
+  var savedVoxelSize = sdf.voxelSize;
+  sdf.data = null;
+
+  if (mc.T.length === 0) {
+    progress('Deep Repair スキップ: 再構築結果が空');
+    return { V: V, T: T, resolution: 0 };
+  }
+
+  var newV = mc.V;
+  var newT = mc.T;
+
+  if (opts.voxelSmoothing !== false && newV.length > 0) {
+    progress('スムージング中...');
+    var smoothIter = opts.voxelSmoothIterations || 3;
+    var smoothLambda = opts.voxelSmoothLambda || 0.5;
+    newV = laplacianSmooth(newV, newT, smoothIter, smoothLambda);
+  }
+
+  if (opts.voxelProjectToSurface !== false && newV.length > 0 && T.length > 0) {
+    progress('元メッシュへの投影中...');
+    var originalBVH = buildBVH(V, T);
+    var maxDist = (typeof opts.voxelProjectMaxDist === 'number') ? opts.voxelProjectMaxDist : savedVoxelSize * 2;
+    newV = projectToOriginalSurface(newV, V, T, originalBVH, maxDist);
+  }
+
+  // 未使用頂点除去
+  progress('最終クリーンアップ中...');
+  var used = new Set();
+  for (var i = 0; i < newT.length; i++) {
+    used.add(newT[i][0]); used.add(newT[i][1]); used.add(newT[i][2]);
+  }
+  var newIdx = new Map();
+  var cleanV = [];
+  for (var i = 0; i < newV.length; i++) {
+    if (used.has(i)) { newIdx.set(i, cleanV.length); cleanV.push(newV[i]); }
+  }
+  for (var i = 0; i < newT.length; i++) {
+    var tri = newT[i];
+    newT[i] = [newIdx.get(tri[0]), newIdx.get(tri[1]), newIdx.get(tri[2])];
+  }
+
+  return { V: cleanV, T: newT, resolution: resolution };
+}
+
+function resolveOptions(V, T, userOpts) {
+  var scale = analyzeScale(V, T);
+  var targetRes = scale.medianEdge / 1000;
+  var mergePrecision = Math.max(3, Math.min(10, Math.round(-Math.log10(Math.max(targetRes, 1e-15)))));
+  var eps = scale.medianEdge * scale.medianEdge * 1e-6;
+  var degenerateThreshold = eps * eps;
+  var holeAreaMultiplier = Math.max(10, Math.min(500, 100 * Math.sqrt(scale.triCount / 5000)));
+  var opts = {
+    scale: scale,
+    mergePrecision: mergePrecision,
+    degenerateThreshold: degenerateThreshold,
+    holeAreaMultiplier: holeAreaMultiplier,
+    localRemeshLimit: 0.3,
+    edgeFlipPasses: 20,
+    nmEdgeIterations: 50,
+    oversizeMultiplier: 20,
+    deepRepair: false,
+    voxelResolution: 'auto',
+    voxelSmoothing: true,
+    voxelSmoothIterations: 3,
+    voxelSmoothLambda: 0.5,
+    voxelProjectToSurface: true,
+    voxelProjectMaxDist: 'auto'
+  };
+  if (userOpts) {
+    for (var key in userOpts) {
+      if (userOpts.hasOwnProperty(key)) opts[key] = userOpts[key];
+    }
+  }
+  return opts;
+}
+
+// ===== 修復メイン =====
+function repairObject(V, T, objId, postProgress, userOpts) {
+  // Set global deadline only for the outermost call (not WI Recovery recursion)
+  var isOuterCall = repairDeadline === 0;
+  if (isOuterCall) repairDeadline = Date.now() + 60000;
+  var vertices = [];
+  for (var i = 0; i < V.length; i++) vertices.push([V[i][0], V[i][1], V[i][2]]);
+  var triangles = [];
+  for (var i = 0; i < T.length; i++) triangles.push([T[i][0], T[i][1], T[i][2]]);
+  var report = {
+    merged: 0, degenerateRemoved: 0, oppositeWindingRemoved: 0,
+    exactDuplicatesRemoved: 0, normalsFlipped: 0,
+    nmFixed: 0, nmVerticesSplit: 0, holesFilled: 0,
+    smallShellsRemoved: 0, selfIntersectionsRepaired: 0
+  };
+
+  // Early skip: overlay-shell-only mesh (all NM edges are count=4, B=0, WI=0)
+  {
+    var preEdgeCounts = new Map();
+    for (var i = 0; i < triangles.length; i++) {
+      var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
+      if (a === b || b === c || c === a) continue;
+      var ek1 = undirEdgeKey(a, b);
+      var ek2 = undirEdgeKey(b, c);
+      var ek3 = undirEdgeKey(c, a);
+      preEdgeCounts.set(ek1, (preEdgeCounts.get(ek1) || 0) + 1);
+      preEdgeCounts.set(ek2, (preEdgeCounts.get(ek2) || 0) + 1);
+      preEdgeCounts.set(ek3, (preEdgeCounts.get(ek3) || 0) + 1);
+    }
+    var preBoundary = 0, preNMReal = 0, preHasOverlay = false;
+    for (var entry of preEdgeCounts) {
+      var cnt = entry[1];
+      if (cnt === 1) preBoundary++;
+      else if (cnt > 2) {
+        if (cnt === 4) preHasOverlay = true;
+        else preNMReal++;
+      }
+    }
+    if (preBoundary === 0 && preNMReal === 0 && preHasOverlay) {
+      var preWIDiag = diagnose(vertices, triangles);
+      if (preWIDiag.windingInconsistencies === 0) {
+        postProgress('Mesh is valid (overlay shells only) - skipping repair');
+        if (isOuterCall) repairDeadline = 0;
+        return { V: vertices, T: triangles, report: report };
+      }
+    }
+  }
+
+  // オプション解決（マージ精度はマージ前のメッシュから計算）
+  var opts = resolveOptions(vertices, triangles, userOpts);
+
+  // Stage 0
+  postProgress('Stage 0/8: 頂点マージ中...');
+  var mr = mergeVertices(vertices, triangles, opts.mergePrecision);
+  vertices = mr.vertices; triangles = mr.triangles; report.merged = mr.merged;
+
+  // Stage 1（マージ後にスケール依存オプションを再計算）
+  postProgress('Stage 1/8: 縮退三角形除去中...');
+  opts = resolveOptions(vertices, triangles);
+  var dr = removeDegenerateTriangles(vertices, triangles, opts.degenerateThreshold);
+  triangles = dr.triangles; report.degenerateRemoved = dr.removed;
+
+  // 浮遊シェル除去（opt-in）
+  if (opts.removeSmallShells) {
+    postProgress('浮遊シェル除去中...');
+    var shellResult = removeSmallShells(vertices, triangles, opts.smallShellThreshold);
+    vertices = shellResult.vertices;
+    triangles = shellResult.triangles;
+    report.smallShellsRemoved = shellResult.removed;
+  }
+
+  // Stage 2
+  postProgress('Stage 2/8: 内部壁除去中...');
+  var owr = removeOppositeWindingDuplicates(triangles);
+  triangles = owr.triangles; report.oppositeWindingRemoved = owr.pairsRemoved;
+
+  // Stage 3
+  postProgress('Stage 3/8: 完全重複除去中...');
+  var edr = removeExactDuplicates(triangles);
+  triangles = edr.triangles; report.exactDuplicatesRemoved = edr.removed;
+
+  // Stage 4（開放面ならボリュームテスト省略）
+  postProgress('Stage 4/8: 法線整合性チェック中...');
+  var preDiag4 = diagnose(vertices, triangles);
+  var skipVolume = preDiag4.boundary > 0;
+  var nr = enforceNormalConsistency(vertices, triangles, skipVolume);
+  triangles = nr.triangles; report.normalsFlipped = nr.flipped;
+
+  // Stage 5
+  postProgress('Stage 5/8: 非多様体エッジ修正中...');
+  var nmr = resolveNonManifoldEdges(vertices, triangles, opts.nmEdgeIterations);
+  triangles = nmr.triangles; report.nmFixed = nmr.fixed;
+
+  // Stage 5b: NMエッジ除去後の法線再整合（体積テスト省略）
+  var nr1b = enforceNormalConsistency(vertices, triangles, true);
+  triangles = nr1b.triangles; report.normalsFlipped += nr1b.flipped;
+
+  // Stage 6
+  postProgress('Stage 6/8: 非多様体頂点修正中...');
+  var nmvr2 = resolveNonManifoldVertices(vertices, triangles);
+  vertices = nmvr2.vertices; triangles = nmvr2.triangles; report.nmVerticesSplit = nmvr2.split;
+
+  // 穴埋め用の面積上限を計算（適応的倍率を使用）
+  var totalOrigArea7 = 0;
+  for (var ai=0;ai<triangles.length;ai++){totalOrigArea7+=triArea3D(vertices,triangles[ai][0],triangles[ai][1],triangles[ai][2]);}
+  var holeMaxTriArea = triangles.length > 0 ? (totalOrigArea7 / triangles.length) * opts.holeAreaMultiplier : 100;
+
+  // 自己交差修復（opt-in）
+  if (opts.repairSelfIntersections) {
+    postProgress('自己交差検出・修復中...');
+    var siResult = repairSelfIntersections(vertices, triangles, holeMaxTriArea);
+    vertices = siResult.vertices;
+    triangles = siResult.triangles;
+    report.selfIntersectionsRepaired = siResult.repaired;
+  }
+
+  // Stage 7: 穴埋め
+  postProgress('Stage 7/8: 穴埋め中...');
+  var maxTriArea7 = holeMaxTriArea;
+  var filled = 0;
+  var lastBoundary = Infinity, stuckCount = 0;
+  for (var iter = 0; iter < 10000; iter++) {
+    if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+    var boundary = getBoundaryEdges(triangles);
+    if (boundary.length === 0) break;
+    if (iter % 100 === 0) postProgress('Stage 7/8: 穴埋め中... ' + filled + '個完了, 残り' + boundary.length);
+    if (boundary.length >= lastBoundary) { stuckCount++; if (stuckCount > 10) break; }
+    else stuckCount = 0;
+    lastBoundary = boundary.length;
+    var loops = findAllLoops(boundary);
+    var didFill = false;
+    if (loops.length > 0) {
+      loops.sort(function(a, b) { return a.length - b.length; });
+      for (var li = 0; li < loops.length; li++) {
+        var loop = loops[li];
+        if (loop.length < 3) continue;
+        var newTris = fillHoleEarClipping(vertices, loop, maxTriArea7);
+        if (newTris.length === 0) continue;
+        for (var ti = 0; ti < newTris.length; ti++) triangles.push(newTris[ti]);
+        filled++; didFill = true; break;
+      }
+    }
+    if (!didFill) {
+      var forced = fillTJunction(boundary);
+      if (forced && triArea3D(vertices,forced[0],forced[1],forced[2])<=maxTriArea7) { triangles.push(forced); filled++; didFill = true; }
+    }
+    if (!didFill) {
+      var chain = findOpenChain(boundary);
+      if (chain && chain.length >= 3) {
+        var newTris2 = fillHoleEarClipping(vertices, chain, maxTriArea7);
+        if (newTris2.length > 0) {
+          for (var ti2=0;ti2<newTris2.length;ti2++) triangles.push(newTris2[ti2]);
+          filled++; didFill = true;
+        }
+      }
+    }
+    if (!didFill) break;
+  }
+  report.holesFilled = filled;
+
+  // Stage 8: 最終クリーンアップ（反復的に修復と穴埋めを繰り返す）
+  postProgress('Stage 8/8: 最終クリーンアップ中...');
+  for (var finalPass = 0; finalPass < 10; finalPass++) {
+    if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+    var diag = quickDiagnose(vertices, triangles);
+    if (diag.isWatertight) break;
+    if (diag.nonManifold > 0) {
+      var nmr2 = resolveNonManifoldEdges(vertices, triangles, opts.nmEdgeIterations);
+      triangles = nmr2.triangles;
+      // NM頂点解決も実行
+      var nmvr8 = resolveNonManifoldVertices(vertices, triangles);
+      vertices = nmvr8.vertices;
+      triangles = nmvr8.triangles;
+    }
+    var diagAfterNM = quickDiagnose(vertices, triangles);
+    if (diagAfterNM.isWatertight) break;
+    if (diagAfterNM.boundary > 0) {
+      var hr8 = fillAllHoles(vertices, triangles, holeMaxTriArea);
+      vertices = hr8.vertices;
+      triangles = hr8.triangles;
+      report.holesFilled += hr8.filled;
+    }
+  }
+
+  // Stage 8b: 残存NMの最終解決
+  {
+    var diagFinal8b = quickDiagnose(vertices, triangles);
+    if (diagFinal8b.nonManifold > 0) {
+      postProgress('残存NM解決中...');
+      // エッジ→三角形インデックスを構築（O(1)ルックアップ）
+      var edgeToTris8b = new Map();
+      for (var i = 0; i < triangles.length; i++) {
+        var a8b = triangles[i][0], b8b = triangles[i][1], c8b = triangles[i][2];
+        var pairs8b = [[a8b,b8b],[b8b,c8b],[c8b,a8b]];
+        for (var pi = 0; pi < 3; pi++) {
+          var ek8b = undirEdgeKey(pairs8b[pi][0], pairs8b[pi][1]);
+          if (!edgeToTris8b.has(ek8b)) edgeToTris8b.set(ek8b, []);
+          edgeToTris8b.get(ek8b).push(i);
+        }
+      }
+      // NMエッジに関連する三角形のスコアリング
+      var triNMEdgeCount = new Map();
+      for (var entry8b of edgeToTris8b) {
+        var tris8b = entry8b[1];
+        if (tris8b.length <= 2 || tris8b.length === 4) continue;
+        for (var ti8b = 0; ti8b < tris8b.length; ti8b++) {
+          triNMEdgeCount.set(tris8b[ti8b], (triNMEdgeCount.get(tris8b[ti8b]) || 0) + 1);
+        }
+      }
+      // NMエッジごとにスコア最低の余分な三角形を除去（2面を残す）
+      var toRemove8b = new Set();
+      for (var entry8b2 of edgeToTris8b) {
+        var tris8b2 = entry8b2[1];
+        if (tris8b2.length <= 2 || tris8b2.length === 4) continue;
+        var trisOnEdge = [];
+        for (var j8b = 0; j8b < tris8b2.length; j8b++) {
+          if (!toRemove8b.has(tris8b2[j8b])) trisOnEdge.push(tris8b2[j8b]);
+        }
+        if (trisOnEdge.length <= 2) continue;
+        trisOnEdge.sort(function(a, b) { return (triNMEdgeCount.get(b) || 0) - (triNMEdgeCount.get(a) || 0); });
+        for (var j8b2 = 0; j8b2 < trisOnEdge.length - 2; j8b2++) toRemove8b.add(trisOnEdge[j8b2]);
+      }
+      if (toRemove8b.size > 0) {
+        triangles = triangles.filter(function(_, i) { return !toRemove8b.has(i); });
+        var nmvr8b = resolveNonManifoldVertices(vertices, triangles);
+        vertices = nmvr8b.vertices;
+        triangles = nmvr8b.triangles;
+        var hr8b = fillAllHoles(vertices, triangles, holeMaxTriArea);
+        vertices = hr8b.vertices;
+        triangles = hr8b.triangles;
+        report.holesFilled += hr8b.filled;
+        var nmr8b = resolveNonManifoldEdges(vertices, triangles, opts.nmEdgeIterations);
+        triangles = nmr8b.triangles;
+        var nmvr8b2 = resolveNonManifoldVertices(vertices, triangles);
+        vertices = nmvr8b2.vertices;
+        triangles = nmvr8b2.triangles;
+      }
+    }
+  }
+
+  // 最終パス: 法線再整合（閉じたメッシュなら体積テストで向き検証）
+  postProgress('最終パス: 法線再整合...');
+  var skipVolFinal = quickDiagnose(vertices, triangles).boundary > 0;
+  var normResult2 = enforceNormalConsistency(vertices, triangles, skipVolFinal);
+  triangles = normResult2.triangles;
+  report.normalsFlipped += normResult2.flipped;
+  var edgeFlipResult = fixWindingByEdgeFlip(vertices, triangles, opts.edgeFlipPasses);
+  triangles = edgeFlipResult.triangles;
+
+  // チェックポイント保存（攻撃的WI修復前）
+  // 局所リメッシュやWI Recoveryがブリッジ等の細い構造を破壊する場合に復元用
+  var cpV = [];
+  for (var cpi = 0; cpi < vertices.length; cpi++) cpV.push([vertices[cpi][0], vertices[cpi][1], vertices[cpi][2]]);
+  var cpT = [];
+  for (var cpi = 0; cpi < triangles.length; cpi++) cpT.push([triangles[cpi][0], triangles[cpi][1], triangles[cpi][2]]);
+  var cpDiag = diagnose(vertices, triangles);
+
+  // 巻き方向不整合が残る場合、局所リメッシュで解消を試みる（NM=0の場合のみ）
+  var preDiag = diagnose(vertices, triangles);
+  if (preDiag.nonManifold === 0 && preDiag.windingInconsistencies > 0) {
+    postProgress('巻き方向不整合の局所リメッシュ中...');
+    var wiRatio1 = preDiag.windingInconsistencies / triangles.length;
+    var adaptiveLimit1 = wiRatio1 > 0.05 ? 0.6 : opts.localRemeshLimit;
+    var remeshResult = fixWindingByLocalRemesh(vertices, triangles, adaptiveLimit1);
+    var remeshedT = remeshResult.triangles;
+
+    // リメッシュ後の修復パイプライン（穴が開くため）
+    var nmvr = resolveNonManifoldVertices(vertices, remeshedT);
+    var remeshedV = nmvr.vertices;
+    remeshedT = nmvr.triangles;
+
+    var rHoles = fillAllHoles(remeshedV, remeshedT, holeMaxTriArea);
+    remeshedV = rHoles.vertices;
+    remeshedT = rHoles.triangles;
+    report.holesFilled += rHoles.filled;
+
+    for (var rp = 0; rp < 5; rp++) {
+      var rd = diagnose(remeshedV, remeshedT);
+      if (rd.nonManifold === 0 && rd.boundary <= preDiag.boundary) break;
+      if (rd.nonManifold > 0) {
+        remeshedT = resolveNonManifoldEdges(remeshedV, remeshedT, opts.nmEdgeIterations).triangles;
+      }
+      var rd2 = diagnose(remeshedV, remeshedT);
+      if (rd2.boundary > 0) {
+        var rh = fillAllHoles(remeshedV, remeshedT, holeMaxTriArea);
+        remeshedV = rh.vertices;
+        remeshedT = rh.triangles;
+        report.holesFilled += rh.filled;
+      }
+      if (rd2.nonManifold === 0 && rd2.boundary <= preDiag.boundary) break;
+    }
+
+    // リメッシュで生じた重複面を除去
+    remeshedT = removeDegenerateTriangles(remeshedV, remeshedT, opts.degenerateThreshold).triangles;
+    remeshedT = removeOppositeWindingDuplicates(remeshedT).triangles;
+    remeshedT = removeExactDuplicates(remeshedT).triangles;
+
+    // 重複除去で穴が開いた場合の再修復
+    for (var rp2 = 0; rp2 < 5; rp2++) {
+      var rd3 = diagnose(remeshedV, remeshedT);
+      if (rd3.nonManifold === 0 && rd3.boundary <= preDiag.boundary) break;
+      if (rd3.nonManifold > 0) {
+        remeshedT = resolveNonManifoldEdges(remeshedV, remeshedT, opts.nmEdgeIterations).triangles;
+      }
+      var rd4 = diagnose(remeshedV, remeshedT);
+      if (rd4.boundary > 0) {
+        var rh2 = fillAllHoles(remeshedV, remeshedT, holeMaxTriArea);
+        remeshedV = rh2.vertices;
+        remeshedT = rh2.triangles;
+      }
+      if (rd4.nonManifold === 0 && rd4.boundary <= preDiag.boundary) break;
+    }
+
+    remeshedT = enforceNormalConsistency(remeshedV, remeshedT, true).triangles;
+    var ef2 = fixWindingByEdgeFlip(remeshedV, remeshedT, opts.edgeFlipPasses);
+    remeshedT = ef2.triangles;
+
+    // Post-BFS repair: fix NM/boundary introduced by remesh
+    for (var postBfsPass = 0; postBfsPass < 5; postBfsPass++) {
+      var pbDiag = quickDiagnose(remeshedV, remeshedT);
+      if (pbDiag.nonManifold === 0 && pbDiag.boundary === 0) break;
+      if (pbDiag.nonManifold > 0) {
+        remeshedT = resolveNonManifoldEdges(remeshedV, remeshedT, opts.nmEdgeIterations).triangles;
+        var nmvr3 = resolveNonManifoldVertices(remeshedV, remeshedT);
+        remeshedV = nmvr3.vertices; remeshedT = nmvr3.triangles;
+      }
+      var pbDiag2 = quickDiagnose(remeshedV, remeshedT);
+      if (pbDiag2.boundary > 0) {
+        var pbHr = fillAllHoles(remeshedV, remeshedT, holeMaxTriArea);
+        remeshedV = pbHr.vertices; remeshedT = pbHr.triangles;
+      }
+    }
+    // Aggressive NM fix: remove 1-ring around remaining NM edges
+    {
+      var pbNmDiag = quickDiagnose(remeshedV, remeshedT);
+      if (pbNmDiag.nonManifold > 0 && pbNmDiag.nonManifold <= 3) {
+        var pbEc = buildEdgeCounts(remeshedT);
+        var pbNmVerts = new Set();
+        pbEc.forEach(function(cnt, k) {
+          if (cnt <= 2 || cnt === 4) return;
+          pbNmVerts.add(Math.floor(k / 1000000));
+          pbNmVerts.add(k % 1000000);
+        });
+        var pbToRemove = new Set();
+        for (var pbi = 0; pbi < remeshedT.length; pbi++) {
+          if (pbNmVerts.has(remeshedT[pbi][0]) || pbNmVerts.has(remeshedT[pbi][1]) || pbNmVerts.has(remeshedT[pbi][2])) {
+            pbToRemove.add(pbi);
+          }
+        }
+        if (pbToRemove.size > 0) {
+          remeshedT = remeshedT.filter(function(_, i) { return !pbToRemove.has(i); });
+          var nmvr4 = resolveNonManifoldVertices(remeshedV, remeshedT);
+          remeshedV = nmvr4.vertices; remeshedT = nmvr4.triangles;
+          var pbHr2 = fillAllHoles(remeshedV, remeshedT, holeMaxTriArea);
+          remeshedV = pbHr2.vertices; remeshedT = pbHr2.triangles;
+          remeshedT = resolveNonManifoldEdges(remeshedV, remeshedT, opts.nmEdgeIterations).triangles;
+          var nmvr5 = resolveNonManifoldVertices(remeshedV, remeshedT);
+          remeshedV = nmvr5.vertices; remeshedT = nmvr5.triangles;
+        }
+      }
+    }
+    // Re-run BFS after NM/boundary fix
+    {
+      var pbCheck = quickDiagnose(remeshedV, remeshedT);
+      if (pbCheck.nonManifold === 0) {
+        remeshedT = enforceNormalConsistency(remeshedV, remeshedT, true).triangles;
+        remeshedT = fixWindingByEdgeFlip(remeshedV, remeshedT, opts.edgeFlipPasses).triangles;
+      }
+    }
+
+    // 巨大三角形チェック: リメッシュ前の最大面積を超える三角形がないか
+    var preMaxArea = 0;
+    for (var pmai=0;pmai<triangles.length;pmai++) {
+      var pt=triangles[pmai];
+      var pe1x=vertices[pt[1]][0]-vertices[pt[0]][0],pe1y=vertices[pt[1]][1]-vertices[pt[0]][1],pe1z=vertices[pt[1]][2]-vertices[pt[0]][2];
+      var pe2x=vertices[pt[2]][0]-vertices[pt[0]][0],pe2y=vertices[pt[2]][1]-vertices[pt[0]][1],pe2z=vertices[pt[2]][2]-vertices[pt[0]][2];
+      var pcx=pe1y*pe2z-pe1z*pe2y,pcy=pe1z*pe2x-pe1x*pe2z,pcz=pe1x*pe2y-pe1y*pe2x;
+      var parea=pcx*pcx+pcy*pcy+pcz*pcz;
+      if(parea>preMaxArea)preMaxArea=parea;
+    }
+    var postMaxArea = 0;
+    for (var qmai=0;qmai<remeshedT.length;qmai++) {
+      var qt=remeshedT[qmai];
+      var qe1x=remeshedV[qt[1]][0]-remeshedV[qt[0]][0],qe1y=remeshedV[qt[1]][1]-remeshedV[qt[0]][1],qe1z=remeshedV[qt[1]][2]-remeshedV[qt[0]][2];
+      var qe2x=remeshedV[qt[2]][0]-remeshedV[qt[0]][0],qe2y=remeshedV[qt[2]][1]-remeshedV[qt[0]][1],qe2z=remeshedV[qt[2]][2]-remeshedV[qt[0]][2];
+      var qcx=qe1y*qe2z-qe1z*qe2y,qcy=qe1z*qe2x-qe1x*qe2z,qcz=qe1x*qe2y-qe1y*qe2x;
+      var qarea=qcx*qcx+qcy*qcy+qcz*qcz;
+      if(qarea>postMaxArea)postMaxArea=qarea;
+    }
+
+    // 結果が改善した場合のみ採用（NM不増加、B不増加、WI減少、OWP不増加、巨大三角形不増加）
+    var postDiag = diagnose(remeshedV, remeshedT);
+    if (postDiag.nonManifold <= preDiag.nonManifold &&
+        postDiag.boundary <= preDiag.boundary &&
+        postDiag.windingInconsistencies < preDiag.windingInconsistencies &&
+        postDiag.oppositeWindingPairs <= preDiag.oppositeWindingPairs &&
+        postMaxArea <= preMaxArea * 4) {
+      vertices = remeshedV;
+      triangles = remeshedT;
+    }
+  }
+
+  // 残存する大きな穴の境界辺を分割して穴埋め
+  // （法線整合・巻き方向修正後に実行: 修正により有向ループが形成されるケースに対応）
+  // 有向ループのみ対象（分岐構造の境界は無理に埋めない: WI悪化を防止）
+  var preBoundaryDiag = diagnose(vertices, triangles);
+  if (preBoundaryDiag.boundary > 0 && preBoundaryDiag.nonManifold === 0) {
+    postProgress('残存穴の境界分割・穴埋め中...');
+
+    for (var bcPass = 0; bcPass < 10; bcPass++) {
+      if (repairDeadline > 0 && Date.now() > repairDeadline) break;
+      var bcDiag = diagnose(vertices, triangles);
+      if (bcDiag.boundary === 0) break;
+
+      // 1. まず小さな有向ループを直接埋める
+      var bcBoundary = getBoundaryEdges(triangles);
+      var bcLoops = findAllLoops(bcBoundary);
+      var bcLoopFilled = 0;
+      for (var bli = 0; bli < bcLoops.length; bli++) {
+        var loop = bcLoops[bli];
+        if (loop.length < 3) continue;
+        var newTris = fillHoleEarClipping(vertices, loop, holeMaxTriArea);
+        if (newTris.length > 0) {
+          for (var bti = 0; bti < newTris.length; bti++) triangles.push(newTris[bti]);
+          bcLoopFilled++;
+        }
+      }
+      report.holesFilled += bcLoopFilled;
+
+      // 2. 大きなループの境界辺を分割（有向ループのみ）
+      var bSubdiv = subdivideLongBoundaryEdges(vertices, triangles, holeMaxTriArea);
+      vertices = bSubdiv.vertices;
+      triangles = bSubdiv.triangles;
+
+      if (bSubdiv.splitCount > 0) {
+        // 3. 分割後の有向ループを埋める
+        bcBoundary = getBoundaryEdges(triangles);
+        bcLoops = findAllLoops(bcBoundary);
+        for (var bli2 = 0; bli2 < bcLoops.length; bli2++) {
+          var loop2 = bcLoops[bli2];
+          if (loop2.length < 3) continue;
+          var newTris2 = fillHoleEarClipping(vertices, loop2, holeMaxTriArea);
+          if (newTris2.length > 0) {
+            for (var bti2 = 0; bti2 < newTris2.length; bti2++) triangles.push(newTris2[bti2]);
+            bcLoopFilled++;
+          }
+        }
+        report.holesFilled += bcLoopFilled;
+      }
+
+      if (bcLoopFilled === 0 && bSubdiv.splitCount === 0) break;
+    }
+
+    // 穴埋め後の法線整合（新三角形の巻き方向を統一）
+    var bcDiagAfter = diagnose(vertices, triangles);
+    if (bcDiagAfter.windingInconsistencies > 0 && bcDiagAfter.nonManifold === 0) {
+      triangles = enforceNormalConsistency(vertices, triangles, true).triangles;
+      triangles = fixWindingByEdgeFlip(vertices, triangles, opts.edgeFlipPasses).triangles;
+
+      // WI残存時は局所リメッシュを試行
+      var bcDiag2 = diagnose(vertices, triangles);
+      if (bcDiag2.windingInconsistencies > 0 && bcDiag2.nonManifold === 0) {
+        var wiRatio2 = bcDiag2.windingInconsistencies / triangles.length;
+        var adaptiveLimit2 = wiRatio2 > 0.05 ? 0.6 : opts.localRemeshLimit;
+        var bcRemesh = fixWindingByLocalRemesh(vertices, triangles, adaptiveLimit2);
+        var rT = bcRemesh.triangles;
+        var rV = vertices;
+        // リメッシュ後の修復
+        var nmvr2 = resolveNonManifoldVertices(rV, rT);
+        rV = nmvr2.vertices; rT = nmvr2.triangles;
+        var rh3 = fillAllHoles(rV, rT, holeMaxTriArea);
+        rV = rh3.vertices; rT = rh3.triangles;
+        for (var rp3 = 0; rp3 < 3; rp3++) {
+          var rd5 = diagnose(rV, rT);
+          if (rd5.nonManifold === 0 && rd5.boundary <= bcDiag2.boundary) break;
+          if (rd5.nonManifold > 0) rT = resolveNonManifoldEdges(rV, rT, opts.nmEdgeIterations).triangles;
+          var rd6 = diagnose(rV, rT);
+          if (rd6.boundary > 0) {
+            var rh4 = fillAllHoles(rV, rT, holeMaxTriArea);
+            rV = rh4.vertices; rT = rh4.triangles;
+          }
+        }
+        rT = removeDegenerateTriangles(rV, rT, opts.degenerateThreshold).triangles;
+        rT = removeOppositeWindingDuplicates(rT).triangles;
+        rT = removeExactDuplicates(rT).triangles;
+        rT = enforceNormalConsistency(rV, rT, true).triangles;
+        rT = fixWindingByEdgeFlip(rV, rT, opts.edgeFlipPasses).triangles;
+        // Post-BFS repair: fix NM/boundary introduced by remesh
+        for (var postBfsPass2 = 0; postBfsPass2 < 5; postBfsPass2++) {
+          var pbDiag3 = quickDiagnose(rV, rT);
+          if (pbDiag3.nonManifold === 0 && pbDiag3.boundary === 0) break;
+          if (pbDiag3.nonManifold > 0) {
+            rT = resolveNonManifoldEdges(rV, rT, opts.nmEdgeIterations).triangles;
+            var nmvr3b = resolveNonManifoldVertices(rV, rT);
+            rV = nmvr3b.vertices; rT = nmvr3b.triangles;
+          }
+          var pbDiag4 = quickDiagnose(rV, rT);
+          if (pbDiag4.boundary > 0) {
+            var pbHr3 = fillAllHoles(rV, rT, holeMaxTriArea);
+            rV = pbHr3.vertices; rT = pbHr3.triangles;
+          }
+        }
+        // Aggressive NM fix: remove 1-ring around remaining NM edges
+        {
+          var pbNmDiag2 = quickDiagnose(rV, rT);
+          if (pbNmDiag2.nonManifold > 0 && pbNmDiag2.nonManifold <= 3) {
+            var pbEc2 = buildEdgeCounts(rT);
+            var pbNmVerts2 = new Set();
+            pbEc2.forEach(function(cnt, k) {
+              if (cnt <= 2 || cnt === 4) return;
+              pbNmVerts2.add(Math.floor(k / 1000000));
+              pbNmVerts2.add(k % 1000000);
+            });
+            var pbToRemove2 = new Set();
+            for (var pbi2 = 0; pbi2 < rT.length; pbi2++) {
+              if (pbNmVerts2.has(rT[pbi2][0]) || pbNmVerts2.has(rT[pbi2][1]) || pbNmVerts2.has(rT[pbi2][2])) {
+                pbToRemove2.add(pbi2);
+              }
+            }
+            if (pbToRemove2.size > 0) {
+              rT = rT.filter(function(_, i) { return !pbToRemove2.has(i); });
+              var nmvr4b = resolveNonManifoldVertices(rV, rT);
+              rV = nmvr4b.vertices; rT = nmvr4b.triangles;
+              var pbHr4 = fillAllHoles(rV, rT, holeMaxTriArea);
+              rV = pbHr4.vertices; rT = pbHr4.triangles;
+              rT = resolveNonManifoldEdges(rV, rT, opts.nmEdgeIterations).triangles;
+              var nmvr5b = resolveNonManifoldVertices(rV, rT);
+              rV = nmvr5b.vertices; rT = nmvr5b.triangles;
+            }
+          }
+        }
+        // Re-run BFS after NM/boundary fix
+        {
+          var pbCheck2 = quickDiagnose(rV, rT);
+          if (pbCheck2.nonManifold === 0) {
+            rT = enforceNormalConsistency(rV, rT, true).triangles;
+            rT = fixWindingByEdgeFlip(rV, rT, opts.edgeFlipPasses).triangles;
+          }
+        }
+        // 改善判定
+        var postD = diagnose(rV, rT);
+        if (postD.nonManifold <= bcDiag2.nonManifold &&
+            postD.boundary <= bcDiag2.boundary &&
+            postD.windingInconsistencies < bcDiag2.windingInconsistencies) {
+          vertices = rV;
+          triangles = rT;
+        }
+      }
+    }
+  }
+
+  // 最終NMクリーンアップ（パイプライン後半で発生したNMを解決）
+  {
+    var finalDiag = quickDiagnose(vertices, triangles);
+    if (finalDiag.nonManifold > 0) {
+      postProgress('最終NMクリーンアップ中...');
+      for (var fc = 0; fc < 5; fc++) {
+        var fd = quickDiagnose(vertices, triangles);
+        if (fd.nonManifold === 0) break;
+        triangles = resolveNonManifoldEdges(vertices, triangles, opts.nmEdgeIterations).triangles;
+        var nmvrFc = resolveNonManifoldVertices(vertices, triangles);
+        vertices = nmvrFc.vertices; triangles = nmvrFc.triangles;
+        var fd2 = quickDiagnose(vertices, triangles);
+        if (fd2.boundary > 0) {
+          var hrFc = fillAllHoles(vertices, triangles, holeMaxTriArea);
+          vertices = hrFc.vertices; triangles = hrFc.triangles;
+          report.holesFilled += hrFc.filled;
+        }
+      }
+      // Stage 8b スタイルの最終NM除去
+      var fd3 = quickDiagnose(vertices, triangles);
+      if (fd3.nonManifold > 0) {
+        var ecFinal = buildEdgeCounts(triangles);
+        var toRemoveFinal = new Set();
+        ecFinal.forEach(function(cnt, k) {
+          if (cnt <= 2 || cnt === 4) return;
+          var ea = Math.floor(k / 1000000), eb = k % 1000000;
+          var trisOnEdge = [];
+          for (var i = 0; i < triangles.length; i++) {
+            if (toRemoveFinal.has(i)) continue;
+            var x = triangles[i][0], y = triangles[i][1], z = triangles[i][2];
+            if ((x === ea || y === ea || z === ea) && (x === eb || y === eb || z === eb)) {
+              trisOnEdge.push(i);
+            }
+          }
+          if (trisOnEdge.length <= 2) return;
+          var scores = trisOnEdge.map(function(ti) {
+            var nmCnt = 0;
+            var tx = triangles[ti][0], ty = triangles[ti][1], tz = triangles[ti][2];
+            var pairs = [[tx,ty],[ty,tz],[tz,tx]];
+            for (var j = 0; j < 3; j++) {
+              var ek = undirEdgeKey(pairs[j][0], pairs[j][1]);
+              var ecVal = ecFinal.get(ek) || 0;
+              if (ecVal > 2 && ecVal !== 4) nmCnt++;
+            }
+            return { idx: ti, nm: nmCnt };
+          });
+          scores.sort(function(a, b) { return b.nm - a.nm; });
+          for (var i = 0; i < scores.length - 2; i++) toRemoveFinal.add(scores[i].idx);
+        });
+        if (toRemoveFinal.size > 0) {
+          triangles = triangles.filter(function(_, i) { return !toRemoveFinal.has(i); });
+          var nmvrFinal = resolveNonManifoldVertices(vertices, triangles);
+          vertices = nmvrFinal.vertices; triangles = nmvrFinal.triangles;
+          var hrFinal = fillAllHoles(vertices, triangles, holeMaxTriArea);
+          vertices = hrFinal.vertices; triangles = hrFinal.triangles;
+          report.holesFilled += hrFinal.filled;
+        }
+      }
+    }
+  }
+
+  // 最終NMクリーンアップ後の残存穴埋め（境界辺分割 + 穴埋め）
+  {
+    var postNMDiag = diagnose(vertices, triangles);
+    if (postNMDiag.boundary > 0 && postNMDiag.nonManifold === 0) {
+      postProgress('最終穴埋め（境界辺分割）...');
+      var bSubdivFinal = subdivideLongBoundaryEdges(vertices, triangles, holeMaxTriArea);
+      vertices = bSubdivFinal.vertices;
+      triangles = bSubdivFinal.triangles;
+      var hrPostNM = fillAllHoles(vertices, triangles, holeMaxTriArea);
+      vertices = hrPostNM.vertices;
+      triangles = hrPostNM.triangles;
+      report.holesFilled += hrPostNM.filled;
+    }
+  }
+
+  // 最終穴埋め後の法線整合（WI解消）
+  {
+    var postFillDiag = diagnose(vertices, triangles);
+    if (postFillDiag.windingInconsistencies > 0 && postFillDiag.nonManifold === 0 &&
+        (repairDeadline === 0 || Date.now() < repairDeadline)) {
+      postProgress('最終法線整合中...');
+      triangles = enforceNormalConsistency(vertices, triangles, true).triangles;
+      triangles = fixWindingByEdgeFlip(vertices, triangles,
+        Math.max(opts.edgeFlipPasses, postFillDiag.windingInconsistencies)).triangles;
+
+      // WIが残る場合は局所リメッシュも試行
+      var postFixDiag = diagnose(vertices, triangles);
+      if (postFixDiag.windingInconsistencies > 0 && postFixDiag.nonManifold === 0) {
+        var wiRatioFinal = postFixDiag.windingInconsistencies / triangles.length;
+        var adaptiveLimitFinal = wiRatioFinal > 0.05 ? 0.6 : opts.localRemeshLimit;
+        var remeshFinal = fixWindingByLocalRemesh(vertices, triangles, adaptiveLimitFinal);
+        var rfT = remeshFinal.triangles;
+        var rfV = vertices;
+        var nmvrRf = resolveNonManifoldVertices(rfV, rfT);
+        rfV = nmvrRf.vertices; rfT = nmvrRf.triangles;
+        var rhRf = fillAllHoles(rfV, rfT, holeMaxTriArea);
+        rfV = rhRf.vertices; rfT = rhRf.triangles;
+        for (var rpRf = 0; rpRf < 3; rpRf++) {
+          var rdRf = diagnose(rfV, rfT);
+          if (rdRf.nonManifold === 0 && rdRf.boundary === 0) break;
+          if (rdRf.nonManifold > 0) rfT = resolveNonManifoldEdges(rfV, rfT, opts.nmEdgeIterations).triangles;
+          var rdRf2 = diagnose(rfV, rfT);
+          if (rdRf2.boundary > 0) {
+            var rhRf2 = fillAllHoles(rfV, rfT, holeMaxTriArea);
+            rfV = rhRf2.vertices; rfT = rhRf2.triangles;
+          }
+        }
+        rfT = removeDegenerateTriangles(rfV, rfT, opts.degenerateThreshold).triangles;
+        rfT = removeOppositeWindingDuplicates(rfT).triangles;
+        rfT = removeExactDuplicates(rfT).triangles;
+        rfT = enforceNormalConsistency(rfV, rfT, true).triangles;
+        rfT = fixWindingByEdgeFlip(rfV, rfT,
+          Math.max(opts.edgeFlipPasses, postFixDiag.windingInconsistencies)).triangles;
+        // Post-BFS repair: fix NM/boundary introduced by remesh
+        for (var postBfsPass3 = 0; postBfsPass3 < 5; postBfsPass3++) {
+          var pbDiag5 = quickDiagnose(rfV, rfT);
+          if (pbDiag5.nonManifold === 0 && pbDiag5.boundary === 0) break;
+          if (pbDiag5.nonManifold > 0) {
+            rfT = resolveNonManifoldEdges(rfV, rfT, opts.nmEdgeIterations).triangles;
+            var nmvr3c = resolveNonManifoldVertices(rfV, rfT);
+            rfV = nmvr3c.vertices; rfT = nmvr3c.triangles;
+          }
+          var pbDiag6 = quickDiagnose(rfV, rfT);
+          if (pbDiag6.boundary > 0) {
+            var pbHr5 = fillAllHoles(rfV, rfT, holeMaxTriArea);
+            rfV = pbHr5.vertices; rfT = pbHr5.triangles;
+          }
+        }
+        // Aggressive NM fix: remove 1-ring around remaining NM edges
+        {
+          var pbNmDiag3 = quickDiagnose(rfV, rfT);
+          if (pbNmDiag3.nonManifold > 0 && pbNmDiag3.nonManifold <= 3) {
+            var pbEc3 = buildEdgeCounts(rfT);
+            var pbNmVerts3 = new Set();
+            pbEc3.forEach(function(cnt, k) {
+              if (cnt <= 2 || cnt === 4) return;
+              pbNmVerts3.add(Math.floor(k / 1000000));
+              pbNmVerts3.add(k % 1000000);
+            });
+            var pbToRemove3 = new Set();
+            for (var pbi3 = 0; pbi3 < rfT.length; pbi3++) {
+              if (pbNmVerts3.has(rfT[pbi3][0]) || pbNmVerts3.has(rfT[pbi3][1]) || pbNmVerts3.has(rfT[pbi3][2])) {
+                pbToRemove3.add(pbi3);
+              }
+            }
+            if (pbToRemove3.size > 0) {
+              rfT = rfT.filter(function(_, i) { return !pbToRemove3.has(i); });
+              var nmvr4c = resolveNonManifoldVertices(rfV, rfT);
+              rfV = nmvr4c.vertices; rfT = nmvr4c.triangles;
+              var pbHr6 = fillAllHoles(rfV, rfT, holeMaxTriArea);
+              rfV = pbHr6.vertices; rfT = pbHr6.triangles;
+              rfT = resolveNonManifoldEdges(rfV, rfT, opts.nmEdgeIterations).triangles;
+              var nmvr5c = resolveNonManifoldVertices(rfV, rfT);
+              rfV = nmvr5c.vertices; rfT = nmvr5c.triangles;
+            }
+          }
+        }
+        // Re-run BFS after NM/boundary fix
+        {
+          var pbCheck3 = quickDiagnose(rfV, rfT);
+          if (pbCheck3.nonManifold === 0) {
+            rfT = enforceNormalConsistency(rfV, rfT, true).triangles;
+            rfT = fixWindingByEdgeFlip(rfV, rfT, opts.edgeFlipPasses).triangles;
+          }
+        }
+        var postRemeshFinal = diagnose(rfV, rfT);
+        if (postRemeshFinal.nonManifold <= postFixDiag.nonManifold &&
+            postRemeshFinal.boundary <= postFixDiag.boundary &&
+            postRemeshFinal.windingInconsistencies < postFixDiag.windingInconsistencies) {
+          vertices = rfV;
+          triangles = rfT;
+        }
+      }
+    }
+  }
+
+  // === Deep Repair（ボクセル再構築）===
+  if (opts.deepRepair === 'always' ||
+      (opts.deepRepair === 'auto' && !quickDiagnose(vertices, triangles).isWatertight)) {
+    postProgress('Deep Repair: ボクセル再構築開始...');
+    var drResult = repairViaVoxelReconstruction(vertices, triangles, postProgress, opts);
+    if (drResult.resolution > 0) {
+      vertices = drResult.V;
+      triangles = drResult.T;
+      report.deepRepairApplied = true;
+      report.deepRepairResolution = drResult.resolution;
+      postProgress('Deep Repair 完了 (解像度: ' + drResult.resolution + ', 三角形: ' + triangles.length + ')');
+    }
+  }
+
+  // 最終法線方向検証: 閉じたメッシュの場合、体積テストで法線が外向きか確認
+  {
+    var orientDiag = quickDiagnose(vertices, triangles);
+    if (orientDiag.isWatertight) {
+      var vol = 0;
+      for (var vi = 0; vi < triangles.length; vi++) {
+        var vv0 = vertices[triangles[vi][0]];
+        var vv1 = vertices[triangles[vi][1]];
+        var vv2 = vertices[triangles[vi][2]];
+        vol += vv0[0] * (vv1[1] * vv2[2] - vv1[2] * vv2[1])
+             + vv0[1] * (vv1[2] * vv2[0] - vv1[0] * vv2[2])
+             + vv0[2] * (vv1[0] * vv2[1] - vv1[1] * vv2[0]);
+      }
+      if (vol < 0) {
+        for (var fi = 0; fi < triangles.length; fi++) {
+          var tmp = triangles[fi][1];
+          triangles[fi][1] = triangles[fi][2];
+          triangles[fi][2] = tmp;
+        }
+        report.normalsFlipped += triangles.length;
+      }
+    }
+  }
+
+  // WI回復: 自己交差が原因の非方向付け可能トポロジを修復
+  // 元メッシュから自己交差修復付きで再実行
+  {
+    var wiPreCheck = diagnose(vertices, triangles);
+    if (wiPreCheck.windingInconsistencies > 0 && wiPreCheck.nonManifold <= 3 &&
+        !opts.repairSelfIntersections && !opts._wiRecoveryRetry &&
+        (repairDeadline === 0 || Date.now() < repairDeadline)) {
+      postProgress('WI回復: 自己交差修復付きで再修復中...');
+      var retryOpts = {};
+      for (var rk in (userOpts || {})) retryOpts[rk] = userOpts[rk];
+      retryOpts.repairSelfIntersections = true;
+      retryOpts._wiRecoveryRetry = true;
+      var retryResult = repairObject(V, T, objId, postProgress, retryOpts);
+      var retryDiag = diagnose(retryResult.V, retryResult.T);
+
+      // 自己交差チェック: retry結果が大量のSIを持つ場合は拒否
+      var retrySICount = 0;
+      if (retryDiag.windingInconsistencies < wiPreCheck.windingInconsistencies &&
+          retryDiag.boundary <= wiPreCheck.boundary + 2) {
+        var siPairs = detectSelfIntersections(retryResult.V, retryResult.T);
+        retrySICount = siPairs.length;
+      }
+
+      // 三角形保存チェック: retry結果がpre-recoveryの60%未満なら拒否
+      var preRecoveryTriCount = triangles.length;
+      var triCountOk = retryResult.T.length >= Math.floor(preRecoveryTriCount * 0.6);
+
+      if (retryDiag.windingInconsistencies < wiPreCheck.windingInconsistencies &&
+          retryDiag.boundary <= wiPreCheck.boundary + 2 &&
+          retrySICount <= Math.floor(retryResult.T.length * 0.05) &&
+          triCountOk) {
+        // 残存NM=1-5の最終解決
+        if (retryDiag.nonManifold > 0 && retryDiag.nonManifold <= 5) {
+          var rV = retryResult.V;
+          var rT = retryResult.T;
+          for (var nmPass = 0; nmPass < 3; nmPass++) {
+            var nmDiag = diagnose(rV, rT);
+            if (nmDiag.nonManifold === 0) break;
+            var ecRetry = buildEdgeCounts(rT);
+            var nmTriSetRetry = new Set();
+            ecRetry.forEach(function(cnt, k) {
+              if (cnt <= 2 || cnt === 4) return;
+              var ea = Math.floor(k / 1000000), eb = k % 1000000;
+              for (var i = 0; i < rT.length; i++) {
+                var x = rT[i][0], y = rT[i][1], z = rT[i][2];
+                if ((x === ea || y === ea || z === ea) && (x === eb || y === eb || z === eb)) {
+                  nmTriSetRetry.add(i);
+                }
+              }
+            });
+            if (nmTriSetRetry.size === 0) break;
+            rT = rT.filter(function(_, i) { return !nmTriSetRetry.has(i); });
+            var nmvrRetry = resolveNonManifoldVertices(rV, rT);
+            rV = nmvrRetry.vertices; rT = nmvrRetry.triangles;
+            var hrRetry = fillAllHoles(rV, rT, holeMaxTriArea);
+            rV = hrRetry.vertices; rT = hrRetry.triangles;
+            rT = resolveNonManifoldEdges(rV, rT, opts.nmEdgeIterations).triangles;
+            var nmvrRetry2 = resolveNonManifoldVertices(rV, rT);
+            rV = nmvrRetry2.vertices; rT = nmvrRetry2.triangles;
+          }
+          rT = enforceNormalConsistency(rV, rT, true).triangles;
+          var finalRetryDiag = diagnose(rV, rT);
+          if (finalRetryDiag.windingInconsistencies <= retryDiag.windingInconsistencies) {
+            retryResult.V = rV;
+            retryResult.T = rT;
+          }
+        }
+        // WI Recovery結果の法線方向検証
+        {
+          var retDiag2 = quickDiagnose(retryResult.V, retryResult.T);
+          if (retDiag2.isWatertight) {
+            var rvol = 0;
+            for (var rvi = 0; rvi < retryResult.T.length; rvi++) {
+              var rv0 = retryResult.V[retryResult.T[rvi][0]];
+              var rv1 = retryResult.V[retryResult.T[rvi][1]];
+              var rv2 = retryResult.V[retryResult.T[rvi][2]];
+              rvol += rv0[0] * (rv1[1] * rv2[2] - rv1[2] * rv2[1])
+                    + rv0[1] * (rv1[2] * rv2[0] - rv1[0] * rv2[2])
+                    + rv0[2] * (rv1[0] * rv2[1] - rv1[1] * rv2[0]);
+            }
+            if (rvol < 0) {
+              for (var rfi = 0; rfi < retryResult.T.length; rfi++) {
+                var rtmp = retryResult.T[rfi][1];
+                retryResult.T[rfi][1] = retryResult.T[rfi][2];
+                retryResult.T[rfi][2] = rtmp;
+              }
+            }
+          }
+        }
+        if (isOuterCall) repairDeadline = 0;
+        return retryResult;
+      }
+
+      // Full retry rejected (triangle loss) — targeted WI fix:
+      // Remove triangles on WI edges, re-fill holes, repeat until WI=0 or no improvement
+      if (!triCountOk && wiPreCheck.windingInconsistencies > 0 &&
+          wiPreCheck.windingInconsistencies <= 500 &&
+          (repairDeadline === 0 || Date.now() < repairDeadline)) {
+        postProgress('WI Recovery: WIエッジ対象修復中...');
+        var twPrevWI = wiPreCheck.windingInconsistencies;
+        for (var twPass = 0; twPass < 5; twPass++) {
+          if (repairDeadline > 0 && Date.now() >= repairDeadline) break;
+
+          // Count directed edges to find WI edges
+          var twDirCounts = new Map();
+          for (var twi = 0; twi < triangles.length; twi++) {
+            var twa = triangles[twi][0], twb = triangles[twi][1], twc = triangles[twi][2];
+            var twk1 = twa * 1000000 + twb;
+            var twk2 = twb * 1000000 + twc;
+            var twk3 = twc * 1000000 + twa;
+            twDirCounts.set(twk1, (twDirCounts.get(twk1) || 0) + 1);
+            twDirCounts.set(twk2, (twDirCounts.get(twk2) || 0) + 1);
+            twDirCounts.set(twk3, (twDirCounts.get(twk3) || 0) + 1);
+          }
+
+          var twWIEdges = new Set();
+          twDirCounts.forEach(function(cnt, key) {
+            var twea = Math.floor(key / 1000000), tweb = key % 1000000;
+            var twRevKey = tweb * 1000000 + twea;
+            var twRevCnt = twDirCounts.get(twRevKey) || 0;
+            if (cnt !== 1 || twRevCnt !== 1) {
+              twWIEdges.add(undirEdgeKey(twea, tweb));
+            }
+          });
+
+          if (twWIEdges.size === 0) break;
+
+          // Find triangles incident on WI edges
+          var twTriSet = new Set();
+          for (var twi2 = 0; twi2 < triangles.length; twi2++) {
+            var twa2 = triangles[twi2][0], twb2 = triangles[twi2][1], twc2 = triangles[twi2][2];
+            if (twWIEdges.has(undirEdgeKey(twa2, twb2)) ||
+                twWIEdges.has(undirEdgeKey(twb2, twc2)) ||
+                twWIEdges.has(undirEdgeKey(twc2, twa2))) {
+              twTriSet.add(twi2);
+            }
+          }
+
+          if (twTriSet.size === 0) break;
+
+          // Save state for rollback
+          var twSavedV = [];
+          for (var twsi = 0; twsi < vertices.length; twsi++) twSavedV.push([vertices[twsi][0], vertices[twsi][1], vertices[twsi][2]]);
+          var twSavedT = [];
+          for (var twsi2 = 0; twsi2 < triangles.length; twsi2++) twSavedT.push([triangles[twsi2][0], triangles[twsi2][1], triangles[twsi2][2]]);
+
+          // Remove WI triangles
+          var twNewT = [];
+          for (var twi3 = 0; twi3 < triangles.length; twi3++) {
+            if (!twTriSet.has(twi3)) twNewT.push(triangles[twi3]);
+          }
+          triangles = twNewT;
+
+          // Fill holes, cleanup
+          var twHr = fillAllHoles(vertices, triangles, holeMaxTriArea);
+          vertices = twHr.vertices;
+          triangles = twHr.triangles;
+
+          triangles = resolveNonManifoldEdges(vertices, triangles, opts.nmEdgeIterations).triangles;
+          var twNmvr = resolveNonManifoldVertices(vertices, triangles);
+          vertices = twNmvr.vertices;
+          triangles = twNmvr.triangles;
+
+          triangles = enforceNormalConsistency(vertices, triangles, true).triangles;
+          triangles = fixWindingByEdgeFlip(vertices, triangles, Math.max(opts.edgeFlipPasses, twPrevWI)).triangles;
+
+          var twPostDiag = diagnose(vertices, triangles);
+          if (twPostDiag.windingInconsistencies >= twPrevWI ||
+              twPostDiag.nonManifold > 0 ||
+              triangles.length < Math.floor(twSavedT.length * 0.8)) {
+            vertices = twSavedV;
+            triangles = twSavedT;
+            break;
+          }
+          twPrevWI = twPostDiag.windingInconsistencies;
+          if (twPrevWI === 0) break;
+        }
+
+        // Final boundary cleanup after WI triangle removal
+        var twFinalDiag = diagnose(vertices, triangles);
+        if (twFinalDiag.boundary > 0) {
+          var twHr2 = fillAllHoles(vertices, triangles, holeMaxTriArea);
+          vertices = twHr2.vertices;
+          triangles = twHr2.triangles;
+          triangles = resolveNonManifoldEdges(vertices, triangles, opts.nmEdgeIterations).triangles;
+          var twNmvr2 = resolveNonManifoldVertices(vertices, triangles);
+          vertices = twNmvr2.vertices;
+          triangles = twNmvr2.triangles;
+          triangles = enforceNormalConsistency(vertices, triangles, true).triangles;
+          triangles = fixWindingByEdgeFlip(vertices, triangles, opts.edgeFlipPasses).triangles;
+        }
+      }
+    }
+  }
+
+  // 品質ゲート: 攻撃的WI修復がジオメトリを破壊した場合はチェックポイントに復元
+  // WIが50%以上改善しなかった場合、ブリッジ等の細い構造が不必要に除去された可能性がある
+  {
+    var postAggressiveDiag = diagnose(vertices, triangles);
+    if (cpDiag.windingInconsistencies > 0 &&
+        postAggressiveDiag.windingInconsistencies > cpDiag.windingInconsistencies * 0.5) {
+      postProgress('WI修復が不十分のため基本修復結果を使用');
+      vertices = cpV;
+      triangles = cpT;
+    }
+  }
+
+  // 修復で生成された浮遊シェルを除去
+  // 基準: 全三角形の2%未満 かつ 最大成分体積の1%未満
+  {
+    var comps = findConnectedComponents(triangles);
+    if (comps.length > 1) {
+      var compVols = [];
+      for (var ci = 0; ci < comps.length; ci++) {
+        var cvol = 0;
+        for (var cj = 0; cj < comps[ci].length; cj++) {
+          var cti = comps[ci][cj];
+          var cv0 = vertices[triangles[cti][0]];
+          var cv1 = vertices[triangles[cti][1]];
+          var cv2 = vertices[triangles[cti][2]];
+          cvol += cv0[0] * (cv1[1] * cv2[2] - cv1[2] * cv2[1])
+               + cv0[1] * (cv1[2] * cv2[0] - cv1[0] * cv2[2])
+               + cv0[2] * (cv1[0] * cv2[1] - cv1[1] * cv2[0]);
+        }
+        compVols.push(Math.abs(cvol / 6));
+      }
+      var maxCompVol = 0;
+      for (var ci = 0; ci < compVols.length; ci++) {
+        if (compVols[ci] > maxCompVol) maxCompVol = compVols[ci];
+      }
+      var totalT = triangles.length;
+      var shellThresh = Math.max(10, Math.floor(totalT * 0.02));
+      var removeSet = {};
+      for (var ci = 0; ci < comps.length; ci++) {
+        if (comps[ci].length < shellThresh && compVols[ci] < maxCompVol * 0.01) {
+          for (var cj = 0; cj < comps[ci].length; cj++) {
+            removeSet[comps[ci][cj]] = 1;
+          }
+        }
+      }
+      var removeKeys = Object.keys(removeSet);
+      if (removeKeys.length > 0) {
+        var newT = [];
+        for (var i = 0; i < triangles.length; i++) {
+          if (!removeSet[i]) newT.push(triangles[i]);
+        }
+        triangles = newT;
+      }
+    }
+  }
+
+  // 巨大三角形の分割（面積上限の1/5を超える三角形をエッジスプリット）
+  postProgress('巨大三角形の分割中...');
+  var subdivResult = subdivideOversizedTriangles(vertices, triangles, holeMaxTriArea / 5);
+  vertices = subdivResult.vertices;
+  triangles = subdivResult.triangles;
+
+  // 最終クリーンアップ: OWPを安全に除去（水密性を破壊しない場合のみ）
+  {
+    var preOwpDiag = quickDiagnose(vertices, triangles);
+    var owpResult = removeOppositeWindingDuplicates(triangles);
+    if (owpResult.pairsRemoved > 0) {
+      var postOwpDiag = quickDiagnose(vertices, owpResult.triangles);
+      if (postOwpDiag.boundary === 0 || postOwpDiag.boundary <= preOwpDiag.boundary) {
+        triangles = owpResult.triangles;
+        report.oppositeWindingRemoved += owpResult.pairsRemoved;
+      } else {
+        var owpT = owpResult.triangles;
+        var owpHr = fillAllHoles(vertices, owpT, holeMaxTriArea);
+        vertices = owpHr.vertices;
+        owpT = owpHr.triangles;
+        var owpFinalDiag = quickDiagnose(vertices, owpT);
+        if (owpFinalDiag.boundary <= preOwpDiag.boundary &&
+            owpFinalDiag.nonManifold <= preOwpDiag.nonManifold) {
+          triangles = owpT;
+          report.oppositeWindingRemoved += owpResult.pairsRemoved;
+          report.holesFilled += owpHr.filled;
+        }
+      }
+    }
+  }
+
+  // 未使用頂点除去
+  var used = new Set();
+  for (var i = 0; i < triangles.length; i++) {
+    used.add(triangles[i][0]); used.add(triangles[i][1]); used.add(triangles[i][2]);
+  }
+  var newIdx = new Map();
+  var newV = [];
+  for (var i = 0; i < vertices.length; i++) {
+    if (used.has(i)) { newIdx.set(i, newV.length); newV.push(vertices[i]); }
+  }
+  vertices = newV;
+  for (var i = 0; i < triangles.length; i++) {
+    var t = triangles[i];
+    triangles[i] = [newIdx.get(t[0]), newIdx.get(t[1]), newIdx.get(t[2])];
+  }
+
+  if (isOuterCall) repairDeadline = 0;
+  return { V: vertices, T: triangles, report: report };
+}
+
+// Worker message handler
+self.onmessage = function(e) {
+  var data = e.data;
+
+  if (data.type === 'init') {
+    // WASM初期化: メインスレッドからbaseUrlを受け取りロード
+    var baseUrl = data.baseUrl;
+    try {
+      importScripts(baseUrl + 'build/mesh-fix-core.js');
+      MeshFixCore({
+        locateFile: function(path) { return baseUrl + 'build/' + path; }
+      }).then(function(mod) {
+        wasmModule = mod;
+        wasmReady = true;
+        self.postMessage({ type: 'wasmReady' });
+      }).catch(function(err) {
+        self.postMessage({ type: 'wasmFailed', error: String(err) });
+      });
+    } catch(err) {
+      self.postMessage({ type: 'wasmFailed', error: String(err) });
+    }
+  }
+  else if (data.type === 'repair') {
+    var objects = data.data.objects;
+    var options = data.data.options || {};
+    var results = [];
+    for (var i = 0; i < objects.length; i++) {
+      var obj = objects[i];
+      self.postMessage({ type: 'progress', objIndex: i, total: objects.length, objId: obj.id, status: 'Object ' + obj.id + ' を処理中...' });
+
+      var result;
+      if (wasmReady && wasmModule) {
+        // WASM版: ブリッジ保護のためスプリアスシェル除去を無効化
+        var wasmOpts = {};
+        for (var k in options) { if (options.hasOwnProperty(k)) wasmOpts[k] = options[k]; }
+        wasmOpts.removeSpuriousShells = false;
+        result = wasmModule.repairObject(obj.V, obj.T, function(status) {
+          self.postMessage({ type: 'subProgress', objIndex: i, total: objects.length, objId: obj.id, status: status });
+        }, wasmOpts);
+      } else {
+        // JSフォールバック
+        result = repairObject(obj.V, obj.T, obj.id, function(status) {
+          self.postMessage({ type: 'subProgress', objIndex: i, total: objects.length, objId: obj.id, status: status });
+        }, options);
+      }
+
+      var d;
+      if (wasmReady && wasmModule) {
+        d = wasmModule.diagnose(result.V, result.T);
+      } else {
+        d = diagnose(result.V, result.T);
+      }
+
+      var rObj = { id: obj.id, V: result.V, T: result.T, report: result.report, diagnosis: d };
+      if (obj._sourcePath) rObj._sourcePath = obj._sourcePath;
+      results.push(rObj);
+      self.postMessage({ type: 'objectDone', objIndex: i, total: objects.length, objId: obj.id, report: result.report, diagnosis: d });
+    }
+    self.postMessage({ type: 'done', results: results });
+  }
+};
+</script>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function log(type, msg) {
+  const el = $('log');
+  el.innerHTML += `<span class="${type}">${msg}</span>\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function status(msg) {
+  const el = $('status');
+  el.style.display = msg ? 'block' : 'none';
+  el.textContent = msg;
+}
+
+function setProgress(p) {
+  $('progress').style.display = 'block';
+  $('progressBar').style.width = Math.min(100, p) + '%';
+}
+
+function hideProgress() {
+  $('progress').style.display = 'none';
+  status('');
+}
+
+function createWorker() {
+  const code = $('workerCode').textContent;
+  const blob = new Blob([code], { type: 'application/javascript' });
+  return new Worker(URL.createObjectURL(blob));
+}
+
+// ===== Parser =====
+function parseObjectsFromXml(xml) {
+  const objects = [];
+  const objRe = /<object\s+id="(\d+)"[^>]*>[\s\S]*?<mesh>([\s\S]*?)<\/mesh>[\s\S]*?<\/object>/gi;
+  let m;
+  while ((m = objRe.exec(xml)) !== null) {
+    const id = m[1];
+    const meshContent = m[2];
+    const V = [], T = [];
+    const vRe = /<vertex\s+x="([^"]+)"\s+y="([^"]+)"\s+z="([^"]+)"/gi;
+    let vm;
+    while ((vm = vRe.exec(meshContent)) !== null) {
+      V.push([+vm[1], +vm[2], +vm[3]]);
+    }
+    const tRe = /<triangle\s+v1="(\d+)"\s+v2="(\d+)"\s+v3="(\d+)"/gi;
+    let tm;
+    while ((tm = tRe.exec(meshContent)) !== null) {
+      T.push([+tm[1], +tm[2], +tm[3]]);
+    }
+    if (V.length > 0) objects.push({ id, V, T });
+  }
+  return objects;
+}
+
+async function parse3MF(buf) {
+  status('ZIPを展開中...');
+  await new Promise(r => setTimeout(r, 0));
+
+  const zip = await JSZip.loadAsync(buf);
+
+  // メインモデルファイルを特定
+  const modelPath = Object.keys(zip.files).find(f =>
+    f.toLowerCase().includes('3dmodel.model') && !f.toLowerCase().includes('objects/')
+  );
+  if (!modelPath) throw new Error('モデルファイルが見つかりません');
+
+  status('XMLを読み込み中...');
+  await new Promise(r => setTimeout(r, 0));
+  const originalXml = await zip.file(modelPath).async('text');
+
+  status('オブジェクトを解析中...');
+  await new Promise(r => setTimeout(r, 0));
+
+  let objects = parseObjectsFromXml(originalXml);
+
+  // メッシュが見つからない場合、全.modelファイルを検索（BambuStudio等のマルチファイル形式）
+  if (objects.length === 0) {
+    const modelFiles = Object.keys(zip.files).filter(f =>
+      f.toLowerCase().endsWith('.model') && f !== modelPath
+    );
+    for (const mf of modelFiles) {
+      const xml = await zip.file(mf).async('text');
+      const fileObjects = parseObjectsFromXml(xml);
+      for (const obj of fileObjects) {
+        obj._sourcePath = mf;
+        objects.push(obj);
+      }
+    }
+  }
+
+  for (let i = 0; i < objects.length; i++) {
+    status(`オブジェクト ${i + 1} を解析... (V:${objects[i].V.length.toLocaleString()}, T:${objects[i].T.length.toLocaleString()})`);
+    await new Promise(r => setTimeout(r, 0));
+  }
+
+  const allModelPaths = Object.keys(zip.files).filter(f => f.toLowerCase().endsWith('.model'));
+  const isMultiFile = objects.length > 0 && objects[0]._sourcePath !== undefined;
+
+  return { objects, originalXml, zip, modelPath, allModelPaths, isMultiFile };
+}
+
+// ===== Write 3MF =====
+async function write3MF(repairedObjects, originalXml, originalZip, modelPath) {
+  status('XMLを生成中...');
+
+  // マルチファイル形式: 各オブジェクトのソースファイルを更新
+  const xmlByPath = new Map();
+
+  for (let oi = 0; oi < repairedObjects.length; oi++) {
+    const obj = repairedObjects[oi];
+    const sourcePath = obj._sourcePath || modelPath;
+
+    status(`XMLを生成中... オブジェクト ${oi + 1}/${repairedObjects.length}`);
+    await new Promise(r => setTimeout(r, 0));
+
+    if (!xmlByPath.has(sourcePath)) {
+      const xml = await originalZip.file(sourcePath).async('text');
+      xmlByPath.set(sourcePath, xml);
+    }
+
+    const vLines = obj.V.map(([x, y, z]) => `<vertex x="${x}" y="${y}" z="${z}"/>`);
+    const tLines = obj.T.map(([a, b, c]) => `<triangle v1="${a}" v2="${b}" v3="${c}"/>`);
+
+    const newMeshContent = `<vertices>\n${vLines.join('\n')}\n</vertices>\n<triangles>\n${tLines.join('\n')}\n</triangles>`;
+
+    const pattern = new RegExp(
+      `(<object\\s+id="${obj.id}"[^>]*>[\\s\\S]*?<mesh>)[\\s\\S]*?(<\\/mesh>[\\s\\S]*?<\\/object>)`,
+      'i'
+    );
+    const currentXml = xmlByPath.get(sourcePath);
+    xmlByPath.set(sourcePath, currentXml.replace(pattern, `$1\n${newMeshContent}\n$2`));
+  }
+
+  status('ZIPを作成中...');
+  await new Promise(r => setTimeout(r, 0));
+  const newZip = new JSZip();
+
+  for (const path of Object.keys(originalZip.files)) {
+    const file = originalZip.files[path];
+    if (file.dir) {
+      newZip.folder(path);
+    } else if (xmlByPath.has(path)) {
+      newZip.file(path, xmlByPath.get(path));
+    } else {
+      const content = await file.async('arraybuffer');
+      newZip.file(path, content);
+    }
+  }
+
+  status('圧縮中...');
+  await new Promise(r => setTimeout(r, 0));
+  return newZip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+}
+
+// ===== UI =====
+function showTable(objects, diagnoses) {
+  let html = `<table>
+    <tr><th>ID</th><th>頂点</th><th>三角形</th><th>非多様体</th><th>境界</th><th>反対巻き</th><th>巻き不整合</th><th>状態</th></tr>`;
+
+  let totalNM = 0, totalB = 0, totalV = 0, totalT = 0, totalOWP = 0, totalWI = 0;
+
+  for (let i = 0; i < objects.length; i++) {
+    const obj = objects[i];
+    const d = diagnoses ? diagnoses[i] : { v: obj.V.length, t: obj.T.length, boundary: '-', nonManifold: '-', oppositeWindingPairs: '-', windingInconsistencies: '-' };
+
+    if (typeof d.nonManifold === 'number') totalNM += d.nonManifold;
+    if (typeof d.boundary === 'number') totalB += d.boundary;
+    if (typeof d.oppositeWindingPairs === 'number') totalOWP += d.oppositeWindingPairs;
+    if (typeof d.windingInconsistencies === 'number') totalWI += d.windingInconsistencies;
+    totalV += (d.v || obj.V.length);
+    totalT += (d.t || obj.T.length);
+
+    const isWatertight = d.nonManifold === 0 && d.boundary === 0;
+    const st = typeof d.boundary === 'number' ? (isWatertight ? '<span class="good">OK</span>' : '<span class="bad">NG</span>') : '-';
+    const owp = d.oppositeWindingPairs;
+    const wi = d.windingInconsistencies;
+
+    html += `<tr>
+      <td>${obj.id}</td>
+      <td>${(d.v || obj.V.length).toLocaleString()}</td>
+      <td>${(d.t || obj.T.length).toLocaleString()}</td>
+      <td class="${d.nonManifold > 0 ? 'bad' : 'good'}">${d.nonManifold}</td>
+      <td class="${d.boundary > 0 ? 'bad' : 'good'}">${typeof d.boundary === 'number' ? d.boundary.toLocaleString() : d.boundary}</td>
+      <td class="${owp > 0 ? 'bad' : 'good'}">${typeof owp === 'number' ? owp : owp || '-'}</td>
+      <td class="${wi > 0 ? 'bad' : 'good'}">${typeof wi === 'number' ? wi : wi || '-'}</td>
+      <td>${st}</td>
+    </tr>`;
+  }
+
+  html += `</table>
+    <p><strong>合計:</strong> V:${totalV.toLocaleString()} T:${totalT.toLocaleString()}
+    非多様体:<span class="${totalNM > 0 ? 'bad' : 'good'}">${totalNM}</span>
+    境界:<span class="${totalB > 0 ? 'bad' : 'good'}">${totalB.toLocaleString()}</span>
+    反対巻き:<span class="${totalOWP > 0 ? 'bad' : 'good'}">${totalOWP}</span>
+    巻き不整合:<span class="${totalWI > 0 ? 'bad' : 'good'}">${totalWI}</span></p>`;
+
+  $('objectTable').innerHTML = html;
+  return { totalNM, totalB };
+}
+
+function formatReport(r) {
+  const parts = [];
+  if (r.merged > 0) parts.push(`頂点マージ:${r.merged}`);
+  if (r.degenerateRemoved > 0) parts.push(`縮退除去:${r.degenerateRemoved}`);
+  if (r.oppositeWindingRemoved > 0) parts.push(`内部壁除去:${r.oppositeWindingRemoved}ペア`);
+  if (r.exactDuplicatesRemoved > 0) parts.push(`重複除去:${r.exactDuplicatesRemoved}`);
+  if (r.normalsFlipped > 0) parts.push(`法線反転:${r.normalsFlipped}`);
+  if (r.nmFixed > 0) parts.push(`非多様体修正:${r.nmFixed}`);
+  if (r.nmVerticesSplit > 0) parts.push(`頂点分離:${r.nmVerticesSplit}`);
+  if (r.holesFilled > 0) parts.push(`穴埋め:${r.holesFilled}`);
+  if (r.selfIntersectionsRepaired > 0) parts.push(`自己交差修復:${r.selfIntersectionsRepaired}`);
+  if (r.deepRepairApplied) parts.push(`ボクセル再構築(${r.deepRepairResolution || 0})`);
+  if (r.smallShellsRemoved > 0) parts.push(`浮遊シェル除去:${r.smallShellsRemoved}`);
+  return parts.join(', ');
+}
+
+// ===== Main =====
+let parsed = null;
+let repairedObjects = null;
+let worker = null;
+
+$('fileInput').onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  $('log').innerHTML = '';
+  log('info', `ファイル: ${file.name} (${(file.size/1024/1024).toFixed(2)}MB)`);
+
+  $('repairBtn').disabled = true;
+  $('downloadBtn').disabled = true;
+
+  try {
+    setProgress(10);
+    parsed = await parse3MF(await file.arrayBuffer());
+    log('info', `オブジェクト数: ${parsed.objects.length}${parsed.isMultiFile ? ' (マルチファイル形式)' : ''}`);
+
+    setProgress(90);
+    status('読み込み完了');
+    showTable(parsed.objects, null);
+
+    setProgress(100);
+    hideProgress();
+    $('repairBtn').disabled = false;
+  } catch (err) {
+    log('error', err.message);
+    console.error(err);
+    hideProgress();
+  }
+};
+
+$('repairBtn').onclick = async () => {
+  if (!parsed) return;
+
+  $('repairBtn').disabled = true;
+  $('downloadBtn').disabled = true;
+  $('cancelBtn').style.display = 'inline-block';
+  $('cancelBtn').disabled = false;
+
+  log('info', '=== 修復開始 ===');
+  setProgress(0);
+  status('WASM モジュールをロード中...');
+
+  worker = createWorker();
+
+  // WASM初期化メッセージを送信
+  const baseUrl = new URL('./', location.href).href;
+  worker.postMessage({ type: 'init', baseUrl: baseUrl });
+
+  worker.onmessage = function(e) {
+    const { type, objIndex, total, objId, status: workerStatus, report, diagnosis, results } = e.data;
+
+    if (type === 'wasmReady') {
+      log('success', 'WASM モジュール ロード完了 (MeshFixLib v3.2-wasm)');
+      worker.postMessage({ type: 'repair', data: { objects: parsed.objects } });
+    }
+    else if (type === 'wasmFailed') {
+      log('warn', 'WASM ロード失敗 - JSフォールバック使用: ' + (e.data.error || ''));
+      log('info', 'JSモード (MeshFixLib v3.1) で修復します');
+      worker.postMessage({ type: 'repair', data: { objects: parsed.objects } });
+    }
+    else if (type === 'progress') {
+      setProgress((objIndex / total) * 95);
+      status(`Object ${objId} を処理中... (${objIndex + 1}/${total})`);
+    }
+    else if (type === 'subProgress') {
+      status(`Object ${objId}: ${workerStatus}`);
+    }
+    else if (type === 'objectDone') {
+      const st = diagnosis.boundary === 0 && diagnosis.nonManifold === 0 ? '水密' : `境界${diagnosis.boundary} 非多様体${diagnosis.nonManifold}`;
+      log('success', `Object ${objId}: ${formatReport(report)} → ${st}`);
+    }
+    else if (type === 'done') {
+      worker.terminate();
+      worker = null;
+
+      repairedObjects = results;
+
+      const diagnoses = results.map(r => r.diagnosis);
+      const { totalNM, totalB } = showTable(results, diagnoses);
+
+      setProgress(100);
+      hideProgress();
+
+      if (totalNM === 0 && totalB === 0) {
+        log('success', '=== 全オブジェクト水密 ===');
+      } else {
+        log('warn', `残り: 非多様体${totalNM}, 境界${totalB}`);
+      }
+
+      $('downloadBtn').disabled = false;
+      $('repairBtn').disabled = false;
+      $('cancelBtn').style.display = 'none';
+    }
+  };
+
+  worker.onerror = function(err) {
+    log('error', 'Worker エラー: ' + err.message);
+    console.error(err);
+    worker.terminate();
+    worker = null;
+    hideProgress();
+    $('repairBtn').disabled = false;
+    $('cancelBtn').style.display = 'none';
+  };
+};
+
+$('cancelBtn').onclick = () => {
+  if (worker) {
+    worker.terminate();
+    worker = null;
+    log('warn', '処理をキャンセルしました');
+    hideProgress();
+    $('repairBtn').disabled = false;
+    $('cancelBtn').style.display = 'none';
+  }
+};
+
+$('downloadBtn').onclick = async () => {
+  if (!repairedObjects) return;
+
+  $('downloadBtn').disabled = true;
+  log('info', 'ファイル生成中...');
+  setProgress(0);
+
+  try {
+    const blob = await write3MF(
+      repairedObjects,
+      parsed.originalXml,
+      parsed.zip,
+      parsed.modelPath,
+      parsed
+    );
+
+    hideProgress();
+
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'repaired.3mf';
+    a.click();
+
+    log('success', `ダウンロード (${(blob.size/1024/1024).toFixed(2)}MB)`);
+  } catch (err) {
+    log('error', err.message);
+    hideProgress();
+  }
+
+  $('downloadBtn').disabled = false;
+};
+
+log('info', 'v38: MeshFixLib v3.2 - WASM対応 8段階修復パイプライン');
+log('info', '  WASM (C++) 版を優先使用、失敗時はJSフォールバック');
+log('info', '  build/mesh-fix-core.wasm が必要です');
+</script>
+</body>
+</html>
