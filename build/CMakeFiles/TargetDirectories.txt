@@ -1,0 +1,3 @@
+C:/Users/User/OneDrive/ドキュメント/keycapGenerator/meshfix/MeshFixLib/build/CMakeFiles/mesh-fix-core.dir
+C:/Users/User/OneDrive/ドキュメント/keycapGenerator/meshfix/MeshFixLib/build/CMakeFiles/edit_cache.dir
+C:/Users/User/OneDrive/ドキュメント/keycapGenerator/meshfix/MeshFixLib/build/CMakeFiles/rebuild_cache.dir
