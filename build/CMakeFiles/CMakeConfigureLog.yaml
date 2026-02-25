@@ -4366,3 +4366,465 @@ events:
         - "/"
       CMAKE_FIND_ROOT_PATH: "C:/emsdk/upstream/emscripten/cache/sysroot"
 ...
+
+---
+events:
+  -
+    kind: "find-v1"
+    backtrace:
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/Platform/Emscripten.cmake:6 (find_file)"
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake:32 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "file"
+    variable: "_EMSCRIPTEN_PLATFORM_MODULE"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "Platform/Emscripten.cmake"
+    candidate_directories:
+      - "C:/emsdk/upstream/emscripten/cmake/Modules/"
+    found: "C:/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+    search_context:
+      ENV{PATH}:
+        - "C:\\emsdk"
+        - "C:\\emsdk\\upstream\\emscripten"
+        - "C:\\emsdk\\python\\3.13.3_64bit"
+        - "C:\\emsdk\\node\\22.16.0_64bit\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\local\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\\Scripts"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
+        - "C:\\Program Files\\Microsoft MPI\\Bin"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\WINDOWS\\system32"
+        - "C:\\WINDOWS"
+        - "C:\\WINDOWS\\System32\\Wbem"
+        - "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0"
+        - "C:\\WINDOWS\\System32\\OpenSSH"
+        - "C:\\Program Files\\dotnet"
+        - "C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit"
+        - "C:\\Program Files\\Common Files\\Autodesk Shared"
+        - "C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn"
+        - "C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR"
+        - "C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common"
+        - "C:\\Program Files\\Docker\\Docker\\resources\\bin"
+        - "C:\\Program Files\\nodejs"
+        - "C:\\Program Files\\Git\\cmd"
+        - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311\\Scripts"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WindowsApps"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Microsoft VS Code\\bin"
+        - "C:\\Users\\User\\AppData\\Roaming\\npm"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WinGet\\Links"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin\\vendor_perl"
+        - "C:\\Program Files\\Git\\usr\\bin\\core_perl"
+      CMAKE_INSTALL_PREFIX: "C:/emsdk/upstream/emscripten/cache/sysroot"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "C:/emsdk/upstream/emscripten/cache/sysroot"
+...
+
+---
+events:
+  -
+    kind: "find-v1"
+    backtrace:
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/Platform/Emscripten.cmake:6 (find_file)"
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake:32 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "file"
+    variable: "_EMSCRIPTEN_PLATFORM_MODULE"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "Platform/Emscripten.cmake"
+    candidate_directories:
+      - "C:/emsdk/upstream/emscripten/cmake/Modules/"
+    found: "C:/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+    search_context:
+      ENV{PATH}:
+        - "C:\\emsdk"
+        - "C:\\emsdk\\upstream\\emscripten"
+        - "C:\\emsdk\\python\\3.13.3_64bit"
+        - "C:\\emsdk\\node\\22.16.0_64bit\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\local\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\\Scripts"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
+        - "C:\\Program Files\\Microsoft MPI\\Bin"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\WINDOWS\\system32"
+        - "C:\\WINDOWS"
+        - "C:\\WINDOWS\\System32\\Wbem"
+        - "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0"
+        - "C:\\WINDOWS\\System32\\OpenSSH"
+        - "C:\\Program Files\\dotnet"
+        - "C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit"
+        - "C:\\Program Files\\Common Files\\Autodesk Shared"
+        - "C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn"
+        - "C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR"
+        - "C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common"
+        - "C:\\Program Files\\Docker\\Docker\\resources\\bin"
+        - "C:\\Program Files\\nodejs"
+        - "C:\\Program Files\\Git\\cmd"
+        - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311\\Scripts"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WindowsApps"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Microsoft VS Code\\bin"
+        - "C:\\Users\\User\\AppData\\Roaming\\npm"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WinGet\\Links"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin\\vendor_perl"
+        - "C:\\Program Files\\Git\\usr\\bin\\core_perl"
+      CMAKE_INSTALL_PREFIX: "C:/emsdk/upstream/emscripten/cache/sysroot"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "C:/emsdk/upstream/emscripten/cache/sysroot"
+...
+
+---
+events:
+  -
+    kind: "find-v1"
+    backtrace:
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/Platform/Emscripten.cmake:6 (find_file)"
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake:32 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "file"
+    variable: "_EMSCRIPTEN_PLATFORM_MODULE"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "Platform/Emscripten.cmake"
+    candidate_directories:
+      - "C:/emsdk/upstream/emscripten/cmake/Modules/"
+    found: "C:/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+    search_context:
+      ENV{PATH}:
+        - "C:\\emsdk"
+        - "C:\\emsdk\\upstream\\emscripten"
+        - "C:\\emsdk\\python\\3.13.3_64bit"
+        - "C:\\emsdk\\node\\22.16.0_64bit\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\local\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\\Scripts"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
+        - "C:\\Program Files\\Microsoft MPI\\Bin"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\WINDOWS\\system32"
+        - "C:\\WINDOWS"
+        - "C:\\WINDOWS\\System32\\Wbem"
+        - "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0"
+        - "C:\\WINDOWS\\System32\\OpenSSH"
+        - "C:\\Program Files\\dotnet"
+        - "C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit"
+        - "C:\\Program Files\\Common Files\\Autodesk Shared"
+        - "C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn"
+        - "C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR"
+        - "C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common"
+        - "C:\\Program Files\\Docker\\Docker\\resources\\bin"
+        - "C:\\Program Files\\nodejs"
+        - "C:\\Program Files\\Git\\cmd"
+        - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311\\Scripts"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WindowsApps"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Microsoft VS Code\\bin"
+        - "C:\\Users\\User\\AppData\\Roaming\\npm"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WinGet\\Links"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin\\vendor_perl"
+        - "C:\\Program Files\\Git\\usr\\bin\\core_perl"
+      CMAKE_INSTALL_PREFIX: "C:/emsdk/upstream/emscripten/cache/sysroot"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "C:/emsdk/upstream/emscripten/cache/sysroot"
+...
+
+---
+events:
+  -
+    kind: "find-v1"
+    backtrace:
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/Platform/Emscripten.cmake:6 (find_file)"
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake:32 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "file"
+    variable: "_EMSCRIPTEN_PLATFORM_MODULE"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "Platform/Emscripten.cmake"
+    candidate_directories:
+      - "C:/emsdk/upstream/emscripten/cmake/Modules/"
+    found: "C:/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+    search_context:
+      ENV{PATH}:
+        - "C:\\emsdk"
+        - "C:\\emsdk\\upstream\\emscripten"
+        - "C:\\emsdk\\python\\3.13.3_64bit"
+        - "C:\\emsdk\\node\\22.16.0_64bit\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\local\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\\Scripts"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
+        - "C:\\Program Files\\Microsoft MPI\\Bin"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\WINDOWS\\system32"
+        - "C:\\WINDOWS"
+        - "C:\\WINDOWS\\System32\\Wbem"
+        - "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0"
+        - "C:\\WINDOWS\\System32\\OpenSSH"
+        - "C:\\Program Files\\dotnet"
+        - "C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit"
+        - "C:\\Program Files\\Common Files\\Autodesk Shared"
+        - "C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn"
+        - "C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR"
+        - "C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common"
+        - "C:\\Program Files\\Docker\\Docker\\resources\\bin"
+        - "C:\\Program Files\\nodejs"
+        - "C:\\Program Files\\Git\\cmd"
+        - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311\\Scripts"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WindowsApps"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Microsoft VS Code\\bin"
+        - "C:\\Users\\User\\AppData\\Roaming\\npm"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WinGet\\Links"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin\\vendor_perl"
+        - "C:\\Program Files\\Git\\usr\\bin\\core_perl"
+      CMAKE_INSTALL_PREFIX: "C:/emsdk/upstream/emscripten/cache/sysroot"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "C:/emsdk/upstream/emscripten/cache/sysroot"
+...
+
+---
+events:
+  -
+    kind: "find-v1"
+    backtrace:
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/Platform/Emscripten.cmake:6 (find_file)"
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake:32 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "file"
+    variable: "_EMSCRIPTEN_PLATFORM_MODULE"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "Platform/Emscripten.cmake"
+    candidate_directories:
+      - "C:/emsdk/upstream/emscripten/cmake/Modules/"
+    found: "C:/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+    search_context:
+      ENV{PATH}:
+        - "C:\\emsdk"
+        - "C:\\emsdk\\upstream\\emscripten"
+        - "C:\\emsdk\\python\\3.13.3_64bit"
+        - "C:\\emsdk\\node\\22.16.0_64bit\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\local\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\\Scripts"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
+        - "C:\\Program Files\\Microsoft MPI\\Bin"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\WINDOWS\\system32"
+        - "C:\\WINDOWS"
+        - "C:\\WINDOWS\\System32\\Wbem"
+        - "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0"
+        - "C:\\WINDOWS\\System32\\OpenSSH"
+        - "C:\\Program Files\\dotnet"
+        - "C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit"
+        - "C:\\Program Files\\Common Files\\Autodesk Shared"
+        - "C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn"
+        - "C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR"
+        - "C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common"
+        - "C:\\Program Files\\Docker\\Docker\\resources\\bin"
+        - "C:\\Program Files\\nodejs"
+        - "C:\\Program Files\\Git\\cmd"
+        - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311\\Scripts"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WindowsApps"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Microsoft VS Code\\bin"
+        - "C:\\Users\\User\\AppData\\Roaming\\npm"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WinGet\\Links"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin\\vendor_perl"
+        - "C:\\Program Files\\Git\\usr\\bin\\core_perl"
+      CMAKE_INSTALL_PREFIX: "C:/emsdk/upstream/emscripten/cache/sysroot"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "C:/emsdk/upstream/emscripten/cache/sysroot"
+...
+
+---
+events:
+  -
+    kind: "find-v1"
+    backtrace:
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/Platform/Emscripten.cmake:6 (find_file)"
+      - "C:/Program Files/CMake/share/cmake-4.2/Modules/CMakeSystemSpecificInformation.cmake:32 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "file"
+    variable: "_EMSCRIPTEN_PLATFORM_MODULE"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "Platform/Emscripten.cmake"
+    candidate_directories:
+      - "C:/emsdk/upstream/emscripten/cmake/Modules/"
+    found: "C:/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+    search_context:
+      ENV{PATH}:
+        - "C:\\emsdk"
+        - "C:\\emsdk\\upstream\\emscripten"
+        - "C:\\emsdk\\python\\3.13.3_64bit"
+        - "C:\\emsdk\\node\\22.16.0_64bit\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\local\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Program Files\\Git\\mingw64\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin"
+        - "C:\\Users\\User\\bin"
+        - "C:\\Program Files\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_3.13.3312.0_x64__qbz5n2kfra8p0\\Scripts"
+        - "C:\\Program Files\\Common Files\\Oracle\\Java\\javapath"
+        - "C:\\Program Files\\Microsoft MPI\\Bin"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\WINDOWS\\system32"
+        - "C:\\WINDOWS"
+        - "C:\\WINDOWS\\System32\\Wbem"
+        - "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0"
+        - "C:\\WINDOWS\\System32\\OpenSSH"
+        - "C:\\Program Files\\dotnet"
+        - "C:\\Program Files (x86)\\Windows Kits\\10\\Windows Performance Toolkit"
+        - "C:\\Program Files\\Common Files\\Autodesk Shared"
+        - "C:\\Program Files\\Microsoft SQL Server\\150\\Tools\\Binn"
+        - "C:\\Program Files\\NVIDIA Corporation\\NVIDIA App\\NvDLISR"
+        - "C:\\Program Files (x86)\\NVIDIA Corporation\\PhysX\\Common"
+        - "C:\\Program Files\\Docker\\Docker\\resources\\bin"
+        - "C:\\Program Files\\nodejs"
+        - "C:\\Program Files\\Git\\cmd"
+        - "C:\\Program Files\\CMake\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311\\Scripts"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Python\\Python311"
+        - "."
+        - "C:\\DAYSIM\\lib"
+        - "C:\\DAYSIM\\bin"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WindowsApps"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Microsoft VS Code\\bin"
+        - "C:\\Users\\User\\AppData\\Roaming\\npm"
+        - "C:\\Users\\User\\AppData\\Local\\Microsoft\\WinGet\\Links"
+        - "C:\\Users\\User\\AppData\\Local\\Programs\\Antigravity\\bin"
+        - "C:\\Program Files\\Git\\usr\\bin\\vendor_perl"
+        - "C:\\Program Files\\Git\\usr\\bin\\core_perl"
+      CMAKE_INSTALL_PREFIX: "C:/emsdk/upstream/emscripten/cache/sysroot"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "C:/emsdk/upstream/emscripten/cache/sysroot"
+...
