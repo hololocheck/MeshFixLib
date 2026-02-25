@@ -75,7 +75,7 @@ DiagnoseResult MeshFix::quickDiagnose(const std::vector<Vec3>& V, const std::vec
     int boundary = 0, nonManifold = 0;
     for (const auto& [key, cnt] : undirEdges) {
         if (cnt == 1) boundary++;
-        else if (cnt > 2 && cnt != 4) nonManifold++;
+        else if (cnt > 2) nonManifold++;
     }
 
     DiagnoseResult result;
@@ -120,7 +120,7 @@ DiagnoseResult MeshFix::diagnose(const std::vector<Vec3>& V, const std::vector<T
 
     for (const auto& [key, cnt] : undirEdges) {
         if (cnt == 1) boundary++;
-        else if (cnt > 2 && cnt != 4) nonManifold++;
+        else if (cnt > 2) nonManifold++;
     }
 
     // Opposite winding pair detection

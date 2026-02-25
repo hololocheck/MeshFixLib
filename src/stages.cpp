@@ -341,8 +341,8 @@ MeshFix::NormResult MeshFix::enforceNormalConsistency(const std::vector<Vec3>& V
         const auto& fwd = info.fwd;
         const auto& rev = info.rev;
         int edgeTotal = (int)(fwd.size() + rev.size());
-        // Skip overlay edges (count=4): they connect separate shells and
-        // would cause BFS to cross between shells incorrectly
+        // Skip count=4 edges in BFS adjacency to prevent cross-shell normal propagation.
+        // These NM edges are resolved separately in Stage 5.
         if (edgeTotal == 4) continue;
         // fwd x rev: consistent
         for (size_t fi = 0; fi < fwd.size(); fi++) {
@@ -447,6 +447,147 @@ MeshFix::NormResult MeshFix::enforceNormalConsistency(const std::vector<Vec3>& V
     return { std::move(result), totalFlipped };
 }
 
+// --- separateOverlayShells ---
+// For count=4 edges (overlapping shells), separate shells by duplicating shared vertices
+// instead of removing triangles. This preserves all geometry.
+MeshFix::SeparateResult MeshFix::separateOverlayShells(const std::vector<Vec3>& V, const std::vector<Tri>& T) const {
+    // Build undirected edge count map
+    std::unordered_map<int64_t, int> edgeCounts;
+    for (size_t i = 0; i < T.size(); i++) {
+        int a = T[i][0], b = T[i][1], c = T[i][2];
+        if (a == b || b == c || c == a) continue;
+        edgeCounts[undirEdgeKey(a, b)]++;
+        edgeCounts[undirEdgeKey(b, c)]++;
+        edgeCounts[undirEdgeKey(c, a)]++;
+    }
+
+    // Check if there are any count>2 edges (overlay/non-manifold)
+    bool hasOverlay = false;
+    for (const auto& [k, cnt] : edgeCounts) {
+        if (cnt > 2) { hasOverlay = true; break; }
+    }
+    if (!hasOverlay) {
+        return { std::vector<Vec3>(V), std::vector<Tri>(T), 0 };
+    }
+
+    // Build connected components using ONLY manifold (count=2) edges
+    int n = (int)T.size();
+    std::unordered_map<int64_t, std::vector<int>> edgeToTris;
+    for (int i = 0; i < n; i++) {
+        int a = T[i][0], b = T[i][1], c = T[i][2];
+        if (a == b || b == c || c == a) continue;
+        int64_t e1 = undirEdgeKey(a, b);
+        int64_t e2 = undirEdgeKey(b, c);
+        int64_t e3 = undirEdgeKey(c, a);
+        edgeToTris[e1].push_back(i);
+        edgeToTris[e2].push_back(i);
+        edgeToTris[e3].push_back(i);
+    }
+
+    // BFS using only count=2 edges
+    std::vector<int> compId(n, -1);
+    int numComps = 0;
+    for (int i = 0; i < n; i++) {
+        if (compId[i] >= 0) continue;
+        int cid = numComps++;
+        std::vector<int> queue;
+        queue.push_back(i);
+        compId[i] = cid;
+        int head = 0;
+        while (head < (int)queue.size()) {
+            int ti = queue[head++];
+            int a = T[ti][0], b = T[ti][1], c = T[ti][2];
+            int64_t edges[3] = { undirEdgeKey(a, b), undirEdgeKey(b, c), undirEdgeKey(c, a) };
+            for (int e = 0; e < 3; e++) {
+                // Only traverse through count=2 (manifold) edges
+                if (edgeCounts[edges[e]] != 2) continue;
+                auto it = edgeToTris.find(edges[e]);
+                if (it == edgeToTris.end()) continue;
+                for (int ni : it->second) {
+                    if (compId[ni] < 0) {
+                        compId[ni] = cid;
+                        queue.push_back(ni);
+                    }
+                }
+            }
+        }
+    }
+
+    if (numComps <= 1) {
+        return { std::vector<Vec3>(V), std::vector<Tri>(T), 0 };
+    }
+
+    // Find vertices shared by multiple components
+    // vertexComps[v] = set of component IDs that use vertex v
+    std::unordered_map<int, std::unordered_set<int>> vertexComps;
+    for (int i = 0; i < n; i++) {
+        if (compId[i] < 0) continue;
+        for (int j = 0; j < 3; j++) {
+            vertexComps[T[i][j]].insert(compId[i]);
+        }
+    }
+
+    // For shared vertices, determine the "primary" component (the one with most triangles)
+    std::vector<int> compTriCount(numComps, 0);
+    for (int i = 0; i < n; i++) {
+        if (compId[i] >= 0) compTriCount[compId[i]]++;
+    }
+
+    // Create vertex mapping: for each (vertex, component) pair that isn't primary,
+    // create a new duplicate vertex
+    std::vector<Vec3> newV(V);
+    std::vector<Tri> newT(T);
+
+    // vertexRemap[original_vertex][component] = new_vertex_index
+    std::unordered_map<int, std::unordered_map<int, int>> vertexRemap;
+    int separated = 0;
+
+    for (auto& [vi, comps] : vertexComps) {
+        if ((int)comps.size() <= 1) continue;
+
+        // Find primary component (largest)
+        int primaryComp = -1;
+        int maxTri = -1;
+        for (int cid : comps) {
+            if (compTriCount[cid] > maxTri) {
+                maxTri = compTriCount[cid];
+                primaryComp = cid;
+            }
+        }
+
+        // For non-primary components, create duplicate vertices
+        for (int cid : comps) {
+            if (cid == primaryComp) continue;
+            int newIdx = (int)newV.size();
+            newV.push_back(V[vi]); // duplicate at same position
+            vertexRemap[vi][cid] = newIdx;
+            separated++;
+        }
+    }
+
+    if (separated == 0) {
+        return { std::vector<Vec3>(V), std::vector<Tri>(T), 0 };
+    }
+
+    // Update triangle indices for non-primary components
+    for (int i = 0; i < n; i++) {
+        int cid = compId[i];
+        if (cid < 0) continue;
+        for (int j = 0; j < 3; j++) {
+            int vi = newT[i][j];
+            auto it = vertexRemap.find(vi);
+            if (it != vertexRemap.end()) {
+                auto it2 = it->second.find(cid);
+                if (it2 != it->second.end()) {
+                    newT[i][j] = it2->second;
+                }
+            }
+        }
+    }
+
+    return { std::move(newV), std::move(newT), separated };
+}
+
 // --- resolveNonManifoldEdges (JS _resolveNonManifoldEdges, line ~1043) ---
 MeshFix::NMResult MeshFix::resolveNonManifoldEdges(const std::vector<Vec3>& V, const std::vector<Tri>& T, int maxIter) const {
     std::vector<Tri> tris(T);
@@ -464,11 +605,11 @@ MeshFix::NMResult MeshFix::resolveNonManifoldEdges(const std::vector<Vec3>& V, c
             }
         }
 
-        // Identify non-manifold edges (skip count=4 overlay edges)
+        // Identify non-manifold edges (count > 2)
         struct NMEdge { int64_t key; std::vector<int> tris; };
         std::vector<NMEdge> nmEdges;
         for (auto& [k, triList] : undirMap) {
-            if ((int)triList.size() > 2 && (int)triList.size() != 4) {
+            if ((int)triList.size() > 2) {
                 nmEdges.push_back({ k, triList });
             }
         }

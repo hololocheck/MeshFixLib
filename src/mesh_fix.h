@@ -157,6 +157,9 @@ public:
     struct NormResult { std::vector<Tri> triangles; int flipped; };
     NormResult enforceNormalConsistency(const std::vector<Vec3>& V, const std::vector<Tri>& T, bool skipVolumeTest) const;
 
+    struct SeparateResult { std::vector<Vec3> vertices; std::vector<Tri> triangles; int separated; };
+    SeparateResult separateOverlayShells(const std::vector<Vec3>& V, const std::vector<Tri>& T) const;
+
     struct NMResult { std::vector<Tri> triangles; int fixed; };
     NMResult resolveNonManifoldEdges(const std::vector<Vec3>& V, const std::vector<Tri>& T, int maxIter) const;
 

@@ -21,39 +21,17 @@ RepairResult MeshFix::repairObject(std::vector<Vec3> V, std::vector<Tri> T,
 
     RepairReport report;
 
-    // Early skip: if mesh only has overlay NM edges (count=4) with B=0 and WI=0,
-    // it's a valid overlapping-shell model that doesn't need repair
-    if (!opts._wiRecoveryRetry) {
-        std::unordered_map<int64_t, int> preEdgeCounts;
-        for (size_t i = 0; i < triangles.size(); i++) {
-            int a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
-            if (a == b || b == c || c == a) continue;
-            preEdgeCounts[undirEdgeKey(a, b)]++;
-            preEdgeCounts[undirEdgeKey(b, c)]++;
-            preEdgeCounts[undirEdgeKey(c, a)]++;
-        }
-        int preBoundary = 0, preNonManifoldReal = 0;
-        bool hasOverlay = false;
-        for (const auto& [k, cnt] : preEdgeCounts) {
-            if (cnt == 1) preBoundary++;
-            else if (cnt > 2) {
-                if (cnt == 4) hasOverlay = true;
-                else preNonManifoldReal++;
-            }
-        }
-        if (preBoundary == 0 && preNonManifoldReal == 0 && hasOverlay) {
-            int preWI = countWindingInconsistencies(triangles);
-            if (preWI == 0) {
-                progress("Mesh is valid (overlay shells only) - skipping repair");
-                auto cleaned = removeUnusedVertices(vertices, triangles);
-                return { std::move(cleaned.vertices), std::move(cleaned.triangles), report };
-            }
-        }
+    // Pre-merge topology check: skip merge if mesh is already manifold
+    // (merging across component boundaries destroys separate shell topology)
+    bool preMergeManifold;
+    {
+        auto preDiag = quickDiagnose(vertices, triangles);
+        preMergeManifold = (preDiag.nonManifold == 0 && preDiag.boundary == 0);
     }
 
-    // Stage 0: Vertex merge
+    // Stage 0: Vertex merge (skip if already manifold)
     progress("Stage 0/8: Merging vertices...");
-    {
+    if (!preMergeManifold) {
         auto mr = mergeVertices(vertices, triangles, opts.mergePrecision);
         vertices = std::move(mr.vertices);
         triangles = std::move(mr.triangles);
@@ -66,6 +44,16 @@ RepairResult MeshFix::repairObject(std::vector<Vec3> V, std::vector<Tri> T,
     {
         DiagnoseResult postMergeDiag = diagnose(vertices, triangles);
         assumeClosedSolid = (postMergeDiag.boundary == 0);
+    }
+
+    // Separate overlay shells: split count=4 edges by duplicating shared vertices
+    {
+        auto sr = separateOverlayShells(vertices, triangles);
+        if (sr.separated > 0) {
+            vertices = std::move(sr.vertices);
+            triangles = std::move(sr.triangles);
+            progress("Separated overlay shells...");
+        }
     }
 
     // Stage 1: Degenerate triangle removal
@@ -541,17 +529,17 @@ RepairResult MeshFix::repairObject(std::vector<Vec3> V, std::vector<Tri> T,
             auto fd3 = quickDiagnose(vertices, triangles);
             if (fd3.nonManifold > 0) {
                 auto ec = buildEdgeCounts(triangles);
-                // Collect and sort NM edge keys for deterministic processing (skip count=4 overlay)
+                // Collect and sort NM edge keys for deterministic processing
                 std::vector<int64_t> nmKeys;
                 for (auto& [k, cnt] : ec) {
-                    if (cnt > 2 && cnt != 4) nmKeys.push_back(k);
+                    if (cnt > 2) nmKeys.push_back(k);
                 }
                 std::sort(nmKeys.begin(), nmKeys.end());
 
                 std::unordered_set<int> toRemove;
                 for (int64_t k : nmKeys) {
                     int cnt = ec[k];
-                    if (cnt <= 2 || cnt == 4) continue;
+                    if (cnt <= 2) continue;
                     int a = (int)(k / 1000000), b = (int)(k % 1000000);
                     std::vector<int> trisOnEdge;
                     for (int i = 0; i < (int)triangles.size(); i++) {
@@ -570,7 +558,7 @@ RepairResult MeshFix::repairObject(std::vector<Vec3> V, std::vector<Tri> T,
                         for (int e = 0; e < 3; e++) {
                             int64_t ek = undirEdgeKey(edges[e][0], edges[e][1]);
                             auto it = ec.find(ek);
-                            if (it != ec.end() && it->second > 2 && it->second != 4) nmCnt++;
+                            if (it != ec.end() && it->second > 2) nmCnt++;
                         }
                         scores.push_back({nmCnt, ti});
                     }
@@ -605,7 +593,7 @@ RepairResult MeshFix::repairObject(std::vector<Vec3> V, std::vector<Tri> T,
             auto ec = buildEdgeCounts(triangles);
             std::unordered_set<int> nmVerts;
             for (auto& [k, cnt] : ec) {
-                if (cnt <= 2 || cnt == 4) continue;
+                if (cnt <= 2) continue;
                 int a = (int)(k / 1000000), b = (int)(k % 1000000);
                 nmVerts.insert(a);
                 nmVerts.insert(b);
@@ -714,7 +702,7 @@ RepairResult MeshFix::repairObject(std::vector<Vec3> V, std::vector<Tri> T,
                         auto ec = buildEdgeCounts(rT);
                         std::unordered_set<int> nmVerts;
                         for (auto& [k, cnt] : ec) {
-                            if (cnt <= 2 || cnt == 4) continue;
+                            if (cnt <= 2) continue;
                             nmVerts.insert((int)(k / 1000000));
                             nmVerts.insert((int)(k % 1000000));
                         }
@@ -833,17 +821,17 @@ RepairResult MeshFix::repairObject(std::vector<Vec3> V, std::vector<Tri> T,
                         auto nmDiag = diagnose(rV, rT);
                         if (nmDiag.nonManifold == 0) break;
                         auto ec = buildEdgeCounts(rT);
-                        // Collect and sort NM edge keys for deterministic processing (skip count=4 overlay)
+                        // Collect and sort NM edge keys for deterministic processing
                         std::vector<int64_t> nmEcKeys;
                         for (auto& [k, cnt] : ec) {
-                            if (cnt > 2 && cnt != 4) nmEcKeys.push_back(k);
+                            if (cnt > 2) nmEcKeys.push_back(k);
                         }
                         std::sort(nmEcKeys.begin(), nmEcKeys.end());
 
                         std::unordered_set<int> nmTriSet;
                         for (int64_t k : nmEcKeys) {
                             int cnt = ec[k];
-                            if (cnt <= 2 || cnt == 4) continue;
+                            if (cnt <= 2) continue;
                             int a = (int)(k / 1000000), b = (int)(k % 1000000);
                             for (int i = 0; i < (int)rT.size(); i++) {
                                 int x = rT[i][0], y = rT[i][1], z = rT[i][2];

@@ -147,7 +147,7 @@ static std::vector<Tri> fillHoleFan(std::vector<Vec3>& V, const std::vector<int>
     int n = static_cast<int>(loop.size());
     if (n < 3) return {};
     if (n == 3) {
-        if (maxTriArea > 0 && MeshFix::triangleArea3D(V, loop[0], loop[1], loop[2]) > maxTriArea) return {};
+        // Always fill 3-vertex loops (same rationale as fillHoleEarClipping)
         return {{loop[0], loop[1], loop[2]}};
     }
 
@@ -186,8 +186,40 @@ std::vector<Tri> MeshFix::fillHoleEarClipping(std::vector<Vec3>& V,
     int n = static_cast<int>(loop.size());
     if (n < 3) return {};
     if (n == 3) {
-        if (maxTriArea > 0 && triangleArea3D(V, loop[0], loop[1], loop[2]) > maxTriArea) return {};
+        // Always fill 3-vertex loops regardless of area limit: a 3-vertex boundary
+        // loop can only be filled with one triangle; rejecting it leaves a permanent hole
         return {{loop[0], loop[1], loop[2]}};
+    }
+
+    // Split self-intersecting loops at pinch points (duplicate vertex positions)
+    // Overlay separation can create boundary loops that visit the same position twice,
+    // forming figure-8 or multi-lobe polygons. Ear-clipping such loops creates
+    // interior-spanning triangles. Splitting at pinch points produces simple sub-loops.
+    if (n > 6) {
+        for (int si = 0; si < n; si++) {
+            for (int sj = si + 2; sj < n; sj++) {
+                if (si == 0 && sj == n - 1) continue;
+                const auto& svi = V[loop[si]];
+                const auto& svj = V[loop[sj]];
+                double sdx = svi[0] - svj[0], sdy = svi[1] - svj[1], sdz = svi[2] - svj[2];
+                if (sdx * sdx + sdy * sdy + sdz * sdz < 1e-6) {
+                    std::vector<int> subLoop1(loop.begin() + si, loop.begin() + sj);
+                    std::vector<int> subLoop2;
+                    for (int sk = sj; sk < n; sk++) subLoop2.push_back(loop[sk]);
+                    for (int sk = 0; sk < si; sk++) subLoop2.push_back(loop[sk]);
+                    std::vector<Tri> subResult;
+                    if (subLoop1.size() >= 3) {
+                        auto sf1 = fillHoleEarClipping(V, subLoop1, maxTriArea);
+                        subResult.insert(subResult.end(), sf1.begin(), sf1.end());
+                    }
+                    if (subLoop2.size() >= 3) {
+                        auto sf2 = fillHoleEarClipping(V, subLoop2, maxTriArea);
+                        subResult.insert(subResult.end(), sf2.begin(), sf2.end());
+                    }
+                    return subResult;
+                }
+            }
+        }
     }
 
     // Compute loop normal using Newell's method
