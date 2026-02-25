@@ -1,0 +1,20 @@
+console.log("--- Starting repairObject ---");
+console.log("");
+var startTime = Date.now();
+var result = repairObject(inputV, inputT, 1, function(msg) {
+  console.log("  [PROGRESS] " + msg);
+});
+var elapsed = Date.now() - startTime;
+console.log("");
+console.log("--- repairObject complete in " + elapsed + "ms ---");
+console.log("Result: V=" + result.V.length + " T=" + result.T.length);
+var finalDiag = diagnose(result.V, result.T);
+console.log("Final diagnosis:");
+console.log("  Boundary: " + finalDiag.boundary);
+console.log("  NonManifold: " + finalDiag.nonManifold);
+console.log("  WindingInconsistencies: " + finalDiag.windingInconsistencies);
+console.log("  OppositeWindingPairs: " + finalDiag.oppositeWindingPairs);
+console.log("  Components: " + finalDiag.components);
+console.log("  IsWatertight: " + finalDiag.isWatertight);
+console.log("");
+console.log("Report:", JSON.stringify(result.report, null, 2));

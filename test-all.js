@@ -6,14 +6,12 @@ const MeshFixLib = require('./mesh-fix-lib.js');
 global.JSZip = JSZip;
 
 // テストケース: [ファイル名, 期待される結果]
-// skip: 修復スキップが期待される (overlay-shell-only)
 // repair: 修復が必要 (NM=0, B=0, WI=0 が期待される)
 const testCases = [
-  // 修復不要モデル (overlay NM only, B=0, WI=0)
-  ['testmodel/初期モデル.3mf', 'skip'],
-  ['testmodel/ランダマイザ出力.3mf', 'skip'],
-  ['testmodel/テーパー処理最大.3mf', 'skip'],
-  // 修復必要モデル
+  // 単体キーキャップモデル
+  ['testmodel/初期モデル.3mf', 'repair'],
+  ['testmodel/ランダマイザ出力.3mf', 'repair'],
+  ['testmodel/テーパー処理最大.3mf', 'repair'],
   ['testmodel/フィレット、テーパー処理あり.3mf', 'repair'],
   ['testmodel/フィレットを最大値にしたモデル.3mf', 'repair'],
   // キーボードモデル
@@ -23,6 +21,12 @@ const testCases = [
   ['testmodel/60%全体.3mf', 'repair'],
   // CSKエクスポートモデル (6 objects, heavy SI repair)
   ['testmodel/CSKエクスポート.3mf', 'repair'],
+  // 非多様体エッジテスト (count=4 shared edges)
+  ['testmodel/非多様体エッジあり.3mf', 'repair'],
+  // トップケーステスト (4 separate components, manifold merge skip)
+  ['testmodel/トップケース.3mf', 'repair'],
+  // 修正前テスト (788 disconnected tris, B=2364, merge+separate)
+  ['testmodel/修正前.3mf', 'repair'],
 ];
 
 async function main() {
@@ -31,7 +35,7 @@ async function main() {
   console.log(`MeshFixLib v${lib.VERSION}\n`);
 
   let allPass = true;
-  let totalObj = 0, passObj = 0, skipObj = 0;
+  let totalObj = 0, passObj = 0;
 
   for (const [file, expectation] of testCases) {
     if (!fs.existsSync(file)) {
@@ -59,24 +63,12 @@ async function main() {
       const isClean = d.nonManifold === 0 && d.boundary === 0 && d.windingInconsistencies <= wiTolerance;
 
       let status;
-      if (expectation === 'skip') {
-        if (!wasModified && d0.boundary === 0 && d0.windingInconsistencies === 0) {
-          status = '✓ SKIP (correctly skipped)';
-          passObj++;
-          skipObj++;
-        } else {
-          status = '✗ FAIL (should have skipped but was modified)';
-          allPass = false;
-        }
+      if (isClean) {
+        status = '✓ OK' + (wasModified ? '' : ' (no changes needed)');
+        passObj++;
       } else {
-        if (isClean) {
-          status = '✓ OK' + (wasModified ? '' : ' (no changes needed)');
-          passObj++;
-          if (!wasModified) skipObj++;
-        } else {
-          status = `✗ FAIL NM=${d.nonManifold} B=${d.boundary} WI=${d.windingInconsistencies}`;
-          allPass = false;
-        }
+        status = `✗ FAIL NM=${d.nonManifold} B=${d.boundary} WI=${d.windingInconsistencies}`;
+        allPass = false;
       }
 
       const parts = [];
@@ -91,7 +83,7 @@ async function main() {
     console.log();
   }
 
-  console.log(`--- Summary: ${passObj}/${totalObj} passed (${skipObj} skipped) ---`);
+  console.log(`--- Summary: ${passObj}/${totalObj} passed ---`);
   console.log(allPass ? '*** ALL TESTS PASSED ***' : '*** SOME TESTS FAILED ***');
   if (!allPass) process.exit(1);
 }

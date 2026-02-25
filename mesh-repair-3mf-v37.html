@@ -115,7 +115,7 @@ function diagnose(V, T) {
   var boundary = 0, nonManifold = 0;
   for (var cnt of undirEdges.values()) {
     if (cnt === 1) boundary++;
-    else if (cnt > 2 && cnt !== 4) nonManifold++;
+    else if (cnt > 2) nonManifold++;
   }
   // 反対巻き重複ペア検出
   var triByUKey = new Map();
@@ -175,19 +175,20 @@ function quickDiagnose(V, T) {
   var boundary = 0, nonManifold = 0;
   for (var cnt of undirEdges.values()) {
     if (cnt === 1) boundary++;
-    else if (cnt > 2 && cnt !== 4) nonManifold++;
+    else if (cnt > 2) nonManifold++;
   }
   return { boundary: boundary, nonManifold: nonManifold, isWatertight: boundary === 0 && nonManifold === 0 };
 }
 
 // ===== Stage 0: 頂点マージ =====
-function mergeVertices(vertices, triangles) {
+function mergeVertices(vertices, triangles, precision) {
+  if (precision === undefined) precision = 6;
   var vMap = new Map();
   var newV = [];
   var indexMap = new Array(vertices.length);
   var merged = 0;
   for (var i = 0; i < vertices.length; i++) {
-    var k = vKey(vertices[i]);
+    var k = vKey(vertices[i], precision);
     if (vMap.has(k)) {
       indexMap[i] = vMap.get(k);
       merged++;
@@ -1309,8 +1310,38 @@ function fillHoleEarClipping(V, loop, maxTriArea) {
   var n = loop.length;
   if (n < 3) return [];
   if (n === 3) {
-    if (maxTriArea && triArea3D(V, loop[0], loop[1], loop[2]) > maxTriArea) return [];
+    // Always fill 3-vertex loops regardless of area limit: a 3-vertex boundary
+    // loop can only be filled with one triangle; rejecting it leaves a permanent hole
     return [[loop[0], loop[1], loop[2]]];
+  }
+  // Split self-intersecting loops at pinch points (duplicate vertex positions)
+  // Overlay separation can create boundary loops that visit the same position twice,
+  // forming figure-8 or multi-lobe polygons. Ear-clipping such loops creates
+  // interior-spanning triangles. Splitting at pinch points produces simple sub-loops.
+  if (n > 6) {
+    for (var si = 0; si < n; si++) {
+      for (var sj = si + 2; sj < n; sj++) {
+        if (si === 0 && sj === n - 1) continue;
+        var svi = V[loop[si]], svj = V[loop[sj]];
+        var sdx = svi[0]-svj[0], sdy = svi[1]-svj[1], sdz = svi[2]-svj[2];
+        if (sdx*sdx + sdy*sdy + sdz*sdz < 1e-6) {
+          var subLoop1 = loop.slice(si, sj);
+          var subLoop2 = [];
+          for (var sk = sj; sk < n; sk++) subLoop2.push(loop[sk]);
+          for (var sk = 0; sk < si; sk++) subLoop2.push(loop[sk]);
+          var subResult = [];
+          if (subLoop1.length >= 3) {
+            var sf1 = fillHoleEarClipping(V, subLoop1, maxTriArea);
+            for (var st = 0; st < sf1.length; st++) subResult.push(sf1[st]);
+          }
+          if (subLoop2.length >= 3) {
+            var sf2 = fillHoleEarClipping(V, subLoop2, maxTriArea);
+            for (var st = 0; st < sf2.length; st++) subResult.push(sf2[st]);
+          }
+          return subResult;
+        }
+      }
+    }
   }
   var nx = 0, ny = 0, nz = 0;
   for (var i = 0; i < n; i++) {
@@ -1383,7 +1414,7 @@ function fillHoleFan(V, loop, maxTriArea) {
   var n = loop.length;
   if (n < 3) return [];
   if (n === 3) {
-    if (maxTriArea && triArea3D(V, loop[0], loop[1], loop[2]) > maxTriArea) return [];
+    // Always fill 3-vertex loops (same rationale as fillHoleEarClipping)
     return [[loop[0], loop[1], loop[2]]];
   }
   var cx = 0, cy = 0, cz = 0;
@@ -2039,6 +2070,146 @@ function resolveOptions(V, T, userOpts) {
   return opts;
 }
 
+// ===== Overlay Shell Separation =====
+function separateOverlayShells(V, T) {
+    // Build undirected edge counts
+    var edgeCounts = new Map();
+    var i, a, b, c, k;
+    for (i = 0; i < T.length; i++) {
+        a = T[i][0]; b = T[i][1]; c = T[i][2];
+        if (a === b || b === c || c === a) continue;
+        k = a < b ? a * 1000000 + b : b * 1000000 + a;
+        edgeCounts.set(k, (edgeCounts.get(k) || 0) + 1);
+        k = b < c ? b * 1000000 + c : c * 1000000 + b;
+        edgeCounts.set(k, (edgeCounts.get(k) || 0) + 1);
+        k = c < a ? c * 1000000 + a : a * 1000000 + c;
+        edgeCounts.set(k, (edgeCounts.get(k) || 0) + 1);
+    }
+
+    // Check for count>2 edges (overlay/non-manifold)
+    var hasOverlay = false;
+    edgeCounts.forEach(function(cnt) { if (cnt > 2) hasOverlay = true; });
+    if (!hasOverlay) return { V: V, T: T, separated: 0 };
+
+    // Build edge->triangle map
+    var edgeToTris = new Map();
+    for (i = 0; i < T.length; i++) {
+        a = T[i][0]; b = T[i][1]; c = T[i][2];
+        if (a === b || b === c || c === a) continue;
+        var edges = [
+            a < b ? a * 1000000 + b : b * 1000000 + a,
+            b < c ? b * 1000000 + c : c * 1000000 + b,
+            c < a ? c * 1000000 + a : a * 1000000 + c
+        ];
+        for (var e = 0; e < 3; e++) {
+            if (!edgeToTris.has(edges[e])) edgeToTris.set(edges[e], []);
+            edgeToTris.get(edges[e]).push(i);
+        }
+    }
+
+    // BFS using only count=2 edges
+    var compId = new Int32Array(T.length);
+    for (i = 0; i < compId.length; i++) compId[i] = -1;
+    var numComps = 0;
+    var queue = [];
+    for (i = 0; i < T.length; i++) {
+        if (compId[i] >= 0) continue;
+        var cid = numComps++;
+        queue.length = 0;
+        queue.push(i);
+        compId[i] = cid;
+        var head = 0;
+        while (head < queue.length) {
+            var ti = queue[head++];
+            a = T[ti][0]; b = T[ti][1]; c = T[ti][2];
+            var triEdges = [
+                a < b ? a * 1000000 + b : b * 1000000 + a,
+                b < c ? b * 1000000 + c : c * 1000000 + b,
+                c < a ? c * 1000000 + a : a * 1000000 + c
+            ];
+            for (var e2 = 0; e2 < 3; e2++) {
+                if (edgeCounts.get(triEdges[e2]) !== 2) continue;
+                var nbrs = edgeToTris.get(triEdges[e2]);
+                if (!nbrs) continue;
+                for (var ni = 0; ni < nbrs.length; ni++) {
+                    if (compId[nbrs[ni]] < 0) {
+                        compId[nbrs[ni]] = cid;
+                        queue.push(nbrs[ni]);
+                    }
+                }
+            }
+        }
+    }
+
+    if (numComps <= 1) return { V: V, T: T, separated: 0 };
+
+    // Find vertices shared by multiple components
+    var vertexComps = new Map();
+    for (i = 0; i < T.length; i++) {
+        if (compId[i] < 0) continue;
+        for (var j = 0; j < 3; j++) {
+            var vi = T[i][j];
+            if (!vertexComps.has(vi)) vertexComps.set(vi, new Set());
+            vertexComps.get(vi).add(compId[i]);
+        }
+    }
+
+    // Count triangles per component
+    var compTriCount = new Array(numComps);
+    for (i = 0; i < numComps; i++) compTriCount[i] = 0;
+    for (i = 0; i < T.length; i++) {
+        if (compId[i] >= 0) compTriCount[compId[i]]++;
+    }
+
+    // Duplicate shared vertices
+    var newV = V.slice();
+    var newT = [];
+    for (i = 0; i < T.length; i++) newT.push([T[i][0], T[i][1], T[i][2]]);
+
+    var vertexRemap = new Map();
+    var separated = 0;
+
+    vertexComps.forEach(function(comps, vi) {
+        if (comps.size <= 1) return;
+        var primaryComp = -1;
+        var maxTri = -1;
+        comps.forEach(function(cid2) {
+            if (compTriCount[cid2] > maxTri) {
+                maxTri = compTriCount[cid2];
+                primaryComp = cid2;
+            }
+        });
+        comps.forEach(function(cid2) {
+            if (cid2 === primaryComp) return;
+            var newIdx = newV.length;
+            newV.push([V[vi][0], V[vi][1], V[vi][2]]);
+            if (!vertexRemap.has(vi)) vertexRemap.set(vi, new Map());
+            vertexRemap.get(vi).set(cid2, newIdx);
+            separated++;
+        });
+    });
+
+    if (separated === 0) return { V: V, T: T, separated: 0 };
+
+    // Update triangle indices
+    for (i = 0; i < newT.length; i++) {
+        var cidI = compId[i];
+        if (cidI < 0) continue;
+        for (var j2 = 0; j2 < 3; j2++) {
+            var viI = newT[i][j2];
+            var remap = vertexRemap.get(viI);
+            if (remap) {
+                var newIdx2 = remap.get(cidI);
+                if (newIdx2 !== undefined) {
+                    newT[i][j2] = newIdx2;
+                }
+            }
+        }
+    }
+
+    return { V: newV, T: newT, separated: separated };
+}
+
 // ===== 修復メイン =====
 function repairObject(V, T, objId, postProgress, userOpts) {
   // Set global deadline only for the outermost call (not WI Recovery recursion)
@@ -2055,45 +2226,33 @@ function repairObject(V, T, objId, postProgress, userOpts) {
     smallShellsRemoved: 0, selfIntersectionsRepaired: 0
   };
 
-  // Early skip: overlay-shell-only mesh (all NM edges are count=4, B=0, WI=0)
-  {
-    var preEdgeCounts = new Map();
-    for (var i = 0; i < triangles.length; i++) {
-      var a = triangles[i][0], b = triangles[i][1], c = triangles[i][2];
-      if (a === b || b === c || c === a) continue;
-      var ek1 = undirEdgeKey(a, b);
-      var ek2 = undirEdgeKey(b, c);
-      var ek3 = undirEdgeKey(c, a);
-      preEdgeCounts.set(ek1, (preEdgeCounts.get(ek1) || 0) + 1);
-      preEdgeCounts.set(ek2, (preEdgeCounts.get(ek2) || 0) + 1);
-      preEdgeCounts.set(ek3, (preEdgeCounts.get(ek3) || 0) + 1);
-    }
-    var preBoundary = 0, preNMReal = 0, preHasOverlay = false;
-    for (var entry of preEdgeCounts) {
-      var cnt = entry[1];
-      if (cnt === 1) preBoundary++;
-      else if (cnt > 2) {
-        if (cnt === 4) preHasOverlay = true;
-        else preNMReal++;
-      }
-    }
-    if (preBoundary === 0 && preNMReal === 0 && preHasOverlay) {
-      var preWIDiag = diagnose(vertices, triangles);
-      if (preWIDiag.windingInconsistencies === 0) {
-        postProgress('Mesh is valid (overlay shells only) - skipping repair');
-        if (isOuterCall) repairDeadline = 0;
-        return { V: vertices, T: triangles, report: report };
-      }
-    }
-  }
-
   // オプション解決（マージ精度はマージ前のメッシュから計算）
   var opts = resolveOptions(vertices, triangles, userOpts);
 
-  // Stage 0
+  // Pre-merge topology check: skip merge if mesh is already manifold
+  var preMergeDiag = quickDiagnose(vertices, triangles);
+  var preMergeManifold = (preMergeDiag.nonManifold === 0 && preMergeDiag.boundary === 0);
+
+  // Stage 0 (skip if already manifold - merging across component boundaries destroys topology)
   postProgress('Stage 0/8: 頂点マージ中...');
-  var mr = mergeVertices(vertices, triangles, opts.mergePrecision);
-  vertices = mr.vertices; triangles = mr.triangles; report.merged = mr.merged;
+  if (!preMergeManifold) {
+    var mr = mergeVertices(vertices, triangles, opts.mergePrecision);
+    vertices = mr.vertices; triangles = mr.triangles; report.merged = mr.merged;
+  }
+
+  // Determine assumeClosedSolid from POST-MERGE state (before overlay sep)
+  // This matches C++ behavior: overlay sep may add boundary edges, but the volume
+  // test in Stage 4 should use the post-merge topology to decide
+  var postMergeDiag = diagnose(vertices, triangles);
+  var assumeClosedSolid = (postMergeDiag.boundary === 0);
+
+  // Separate overlay shells (count>2 edges)
+  var sepResult = separateOverlayShells(vertices, triangles);
+  if (sepResult.separated > 0) {
+      vertices = sepResult.V;
+      triangles = sepResult.T;
+      postProgress('Separated overlay shells...');
+  }
 
   // Stage 1（マージ後にスケール依存オプションを再計算）
   postProgress('Stage 1/8: 縮退三角形除去中...');
@@ -2120,10 +2279,9 @@ function repairObject(V, T, objId, postProgress, userOpts) {
   var edr = removeExactDuplicates(triangles);
   triangles = edr.triangles; report.exactDuplicatesRemoved = edr.removed;
 
-  // Stage 4（開放面ならボリュームテスト省略）
+  // Stage 4（C++と同じ: マージ後のassumeClosedSolidで判定）
   postProgress('Stage 4/8: 法線整合性チェック中...');
-  var preDiag4 = diagnose(vertices, triangles);
-  var skipVolume = preDiag4.boundary > 0;
+  var skipVolume = !assumeClosedSolid;
   var nr = enforceNormalConsistency(vertices, triangles, skipVolume);
   triangles = nr.triangles; report.normalsFlipped = nr.flipped;
 
@@ -2378,7 +2536,7 @@ function repairObject(V, T, objId, postProgress, userOpts) {
         var pbEc = buildEdgeCounts(remeshedT);
         var pbNmVerts = new Set();
         pbEc.forEach(function(cnt, k) {
-          if (cnt <= 2 || cnt === 4) return;
+          if (cnt <= 2) return;
           pbNmVerts.add(Math.floor(k / 1000000));
           pbNmVerts.add(k % 1000000);
         });
@@ -2548,7 +2706,7 @@ function repairObject(V, T, objId, postProgress, userOpts) {
             var pbEc2 = buildEdgeCounts(rT);
             var pbNmVerts2 = new Set();
             pbEc2.forEach(function(cnt, k) {
-              if (cnt <= 2 || cnt === 4) return;
+              if (cnt <= 2) return;
               pbNmVerts2.add(Math.floor(k / 1000000));
               pbNmVerts2.add(k % 1000000);
             });
@@ -2614,7 +2772,7 @@ function repairObject(V, T, objId, postProgress, userOpts) {
         var ecFinal = buildEdgeCounts(triangles);
         var toRemoveFinal = new Set();
         ecFinal.forEach(function(cnt, k) {
-          if (cnt <= 2 || cnt === 4) return;
+          if (cnt <= 2) return;
           var ea = Math.floor(k / 1000000), eb = k % 1000000;
           var trisOnEdge = [];
           for (var i = 0; i < triangles.length; i++) {
@@ -2726,7 +2884,7 @@ function repairObject(V, T, objId, postProgress, userOpts) {
             var pbEc3 = buildEdgeCounts(rfT);
             var pbNmVerts3 = new Set();
             pbEc3.forEach(function(cnt, k) {
-              if (cnt <= 2 || cnt === 4) return;
+              if (cnt <= 2) return;
               pbNmVerts3.add(Math.floor(k / 1000000));
               pbNmVerts3.add(k % 1000000);
             });
@@ -2846,7 +3004,7 @@ function repairObject(V, T, objId, postProgress, userOpts) {
             var ecRetry = buildEdgeCounts(rT);
             var nmTriSetRetry = new Set();
             ecRetry.forEach(function(cnt, k) {
-              if (cnt <= 2 || cnt === 4) return;
+              if (cnt <= 2) return;
               var ea = Math.floor(k / 1000000), eb = k % 1000000;
               for (var i = 0; i < rT.length; i++) {
                 var x = rT[i][0], y = rT[i][1], z = rT[i][2];
@@ -3063,25 +3221,28 @@ function repairObject(V, T, objId, postProgress, userOpts) {
   triangles = subdivResult.triangles;
 
   // 最終クリーンアップ: OWPを安全に除去（水密性を破壊しない場合のみ）
+  // 既に水密の場合はOWP除去をスキップ: 除去後の穴埋めが巨大三角形を生成するリスクを回避
   {
     var preOwpDiag = quickDiagnose(vertices, triangles);
-    var owpResult = removeOppositeWindingDuplicates(triangles);
-    if (owpResult.pairsRemoved > 0) {
-      var postOwpDiag = quickDiagnose(vertices, owpResult.triangles);
-      if (postOwpDiag.boundary === 0 || postOwpDiag.boundary <= preOwpDiag.boundary) {
-        triangles = owpResult.triangles;
-        report.oppositeWindingRemoved += owpResult.pairsRemoved;
-      } else {
-        var owpT = owpResult.triangles;
-        var owpHr = fillAllHoles(vertices, owpT, holeMaxTriArea);
-        vertices = owpHr.vertices;
-        owpT = owpHr.triangles;
-        var owpFinalDiag = quickDiagnose(vertices, owpT);
-        if (owpFinalDiag.boundary <= preOwpDiag.boundary &&
-            owpFinalDiag.nonManifold <= preOwpDiag.nonManifold) {
-          triangles = owpT;
+    if (!preOwpDiag.isWatertight) {
+      var owpResult = removeOppositeWindingDuplicates(triangles);
+      if (owpResult.pairsRemoved > 0) {
+        var postOwpDiag = quickDiagnose(vertices, owpResult.triangles);
+        if (postOwpDiag.boundary === 0 || postOwpDiag.boundary <= preOwpDiag.boundary) {
+          triangles = owpResult.triangles;
           report.oppositeWindingRemoved += owpResult.pairsRemoved;
-          report.holesFilled += owpHr.filled;
+        } else {
+          var owpT = owpResult.triangles;
+          var owpHr = fillAllHoles(vertices, owpT, holeMaxTriArea);
+          vertices = owpHr.vertices;
+          owpT = owpHr.triangles;
+          var owpFinalDiag = quickDiagnose(vertices, owpT);
+          if (owpFinalDiag.boundary <= preOwpDiag.boundary &&
+              owpFinalDiag.nonManifold <= preOwpDiag.nonManifold) {
+            triangles = owpT;
+            report.oppositeWindingRemoved += owpResult.pairsRemoved;
+            report.holesFilled += owpHr.filled;
+          }
         }
       }
     }
