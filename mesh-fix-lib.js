@@ -201,6 +201,119 @@ class MeshFixLib {
     return this._wasmModule.diagnose(V, T);
   }
 
+  // ===== Phase 10-A1: 軽量クリーンアップ (JS側・WASM呼び出し前の前処理) =====
+  // 1e-5未満の重複頂点をマージし、2つ以上のインデックスが一致する縮退三角形を破棄する。
+  // WASMが扱う頂点・三角形数を削減してWASM時間を短縮するためのヘルパー。
+  // @param {Array<Array<number>>} V 頂点配列 [[x,y,z], ...]
+  // @param {Array<Array<number>>} T 三角形配列 [[a,b,c], ...]
+  // @returns {{V: Array, T: Array, removed: {duplicateVerts: number, degenerateTris: number}}}
+  static lightCleanup(V, T) {
+    if (!V || !T) return { V: V || [], T: T || [], removed: { duplicateVerts: 0, degenerateTris: 0 } };
+
+    // 重複頂点マージ (1e-5精度)
+    const map = new Map();
+    const newV = [];
+    const remap = new Array(V.length);
+    for (let i = 0; i < V.length; i++) {
+      const v = V[i];
+      const key = v[0].toFixed(5) + '|' + v[1].toFixed(5) + '|' + v[2].toFixed(5);
+      if (map.has(key)) {
+        remap[i] = map.get(key);
+      } else {
+        const newIdx = newV.length;
+        map.set(key, newIdx);
+        remap[i] = newIdx;
+        newV.push([v[0], v[1], v[2]]);
+      }
+    }
+    const duplicateVerts = V.length - newV.length;
+
+    // 縮退三角形を捨てつつ remap 適用
+    const newT = [];
+    let degenerateTris = 0;
+    for (let i = 0; i < T.length; i++) {
+      const t = T[i];
+      const a = remap[t[0]];
+      const b = remap[t[1]];
+      const c = remap[t[2]];
+      if (a === b || b === c || a === c) {
+        degenerateTris++;
+        continue;
+      }
+      newT.push([a, b, c]);
+    }
+
+    return { V: newV, T: newT, removed: { duplicateVerts, degenerateTris } };
+  }
+
+  // ===== Phase 10-A3: 修復ステージ情報 (UIの進捗表示用) =====
+  // 各 id は WASM 内の主要パスに対応。ラベルは UI の「現在のフェーズ」表示に流用できる。
+  static STAGES = Object.freeze([
+    { id: 'merge_vertices',    label: '重複頂点統合' },
+    { id: 'remove_degenerate', label: '縮退三角形削除' },
+    { id: 'fix_normals',       label: '法線方向修正' },
+    { id: 'fill_holes',        label: '穴埋め' },
+    { id: 'voxel_remesh',      label: 'ボクセルリメッシュ (任意)' }
+  ]);
+
+  // ===== Phase 10-A4: 修復失敗時の代替オプション enum =====
+  // 呼び出し側 (UI) は repair が失敗したとき、これらの選択肢をユーザーに提示すべき。
+  // - raw:           修復をスキップして入力をそのまま出力
+  // - light:         lightCleanup() のみ適用 (WASM不要)
+  // - diagnose_only: diagnose() の結果だけを表示し、エクスポートしない
+  // - abort:         処理を完全に中止
+  static FALLBACK_OPTIONS = Object.freeze({
+    raw: '修復なしで出力',
+    light: '軽量修復のみ',
+    diagnose_only: '診断結果のみ表示',
+    abort: 'キャンセル'
+  });
+
+  // ===== Phase 10-A5: 3MF メタデータ検証 =====
+  // write3MF 後の生成物（または既存 modelXml）が最低限の構造要素を持つかを検査する。
+  // @param {JSZip|null} zipObject - 任意。指定されれば中身ファイル数も報告。
+  // @param {string} modelXml - 3dmodel.model の XML 文字列
+  // @returns {{ ok: boolean, issues: string[], objectCount: number, fileCount: number }}
+  static validate3MFContent(zipObject, modelXml) {
+    const issues = [];
+    const xml = (typeof modelXml === 'string') ? modelXml : '';
+
+    // 必須構造要素
+    const hasResources = /<resources[\s>]/i.test(xml);
+    const hasBuild     = /<build[\s>]/i.test(xml);
+    const objectMatches = xml.match(/<object\s+id="[^"]+"/gi) || [];
+    const objectCount = objectMatches.length;
+
+    if (!hasResources) issues.push('<resources> 要素が見つからない');
+    if (!hasBuild)     issues.push('<build> 要素が見つからない');
+    if (objectCount === 0) issues.push('<object id="..."> が1つも見つからない');
+
+    // AMS / マテリアル参照は厳密スキーマ確定が困難なので、出現件数のみ報告する
+    const buildItemMatches = xml.match(/<item\s+objectid="[^"]+"/gi) || [];
+    if (buildItemMatches.length === 0 && hasBuild) {
+      issues.push('<build> に <item objectid="..."> が無い');
+    }
+    if (buildItemMatches.length !== objectCount && objectCount > 0) {
+      // 必ずしもエラーではないが警告として残す
+      issues.push(`build の item 数 (${buildItemMatches.length}) と object 数 (${objectCount}) が不一致`);
+    }
+
+    let fileCount = 0;
+    try {
+      if (zipObject && zipObject.files) {
+        fileCount = Object.keys(zipObject.files).length;
+      }
+    } catch (e) { /* ignore */ }
+
+    return {
+      ok: issues.length === 0,
+      issues,
+      objectCount,
+      fileCount,
+      buildItemCount: buildItemMatches.length
+    };
+  }
+
   // ===== Phase 5-3: 修復プロファイル =====
   // ユースケースごとに事前定義されたオプションセットを返す。
   // - fast:           軽量メッシュ用、クリティカルな修復のみ
@@ -308,10 +421,27 @@ class MeshFixLib {
 
   // ===== 修復 (WASM) =====
 
-  async repairObject(V, T, onProgress = null, userOptions = null) {
+  /**
+   * オブジェクト1つを修復する。
+   * @param {Array} V 頂点配列
+   * @param {Array} T 三角形配列
+   * @param {Function|null} onProgress 進捗コールバック
+   * @param {Object|string|null} userOptions プロファイル名または explicit option
+   * @param {Object} [extra] - { signal?: AbortSignal-like }
+   *   signal.aborted が true なら Error('Cancelled') をスローする。
+   *   Phase 10-A2 注: WASM呼び出しはアトミックなので、中断は WASM の前後でのみ可能。
+   *   実行中の WASM ステップを途中で止めることはできない。
+   */
+  async repairObject(V, T, onProgress = null, userOptions = null, extra = null) {
     if (!this._wasmModule) {
       throw new Error('WASM module not initialized. Call init() first.');
     }
+
+    const signal = extra && extra.signal ? extra.signal : null;
+    const checkAbort = () => {
+      if (signal && signal.aborted) throw new Error('Cancelled');
+    };
+    checkAbort();
 
     // userOptions が文字列 (プロファイル名) なら展開
     let opts;
@@ -326,7 +456,11 @@ class MeshFixLib {
     let beforeDiag = null;
     try { beforeDiag = this._wasmModule.diagnose(V, T); } catch (e) { /* ignore */ }
 
+    checkAbort(); // WASM 呼び出し直前の最終チェック
+
     const result = this._wasmModule.repairObject(V, T, progressFn, opts);
+
+    checkAbort(); // WASM 終了直後 (結果は破棄される)
 
     this._lastRepairData = { V: result.V, T: result.T };
 
@@ -335,6 +469,12 @@ class MeshFixLib {
     try { afterDiag = this._wasmModule.diagnose(result.V, result.T); } catch (e) { /* ignore */ }
     const fullReport = this.buildRepairReport(beforeDiag, afterDiag, { V, T }, { V: result.V, T: result.T }, result.report);
 
+    // Phase 10-A6: 変更領域の近似アノテーション
+    // 入力頂点位置の集合 (5桁丸めキー) と出力の集合を比較し、
+    // 「after にしか無い頂点」「before にしか無い頂点」を列挙する。
+    // re-meshing 等では全頂点が変わるため近似でしかない。
+    fullReport.changedRegions = MeshFixLib._computeChangedRegions(V, result.V);
+
     return {
       V: result.V,
       T: result.T,
@@ -342,6 +482,30 @@ class MeshFixLib {
       fullReport,
       diagnose: { before: beforeDiag, after: afterDiag }
     };
+  }
+
+  // Phase 10-A6: hash された頂点位置を比較して changedRegions を作る
+  // 5桁の固定小数キーを使って Set ベースで集合差分を取る軽量近似。
+  static _computeChangedRegions(beforeV, afterV) {
+    try {
+      const keyOf = (v) => v[0].toFixed(5) + '|' + v[1].toFixed(5) + '|' + v[2].toFixed(5);
+      const beforeKeys = new Map();
+      for (let i = 0; i < beforeV.length; i++) beforeKeys.set(keyOf(beforeV[i]), i);
+      const afterKeys = new Map();
+      for (let i = 0; i < afterV.length; i++) afterKeys.set(keyOf(afterV[i]), i);
+
+      const addedVertexIndices = [];
+      for (const [k, idx] of afterKeys) {
+        if (!beforeKeys.has(k)) addedVertexIndices.push(idx);
+      }
+      const removedVertexIndices = [];
+      for (const [k, idx] of beforeKeys) {
+        if (!afterKeys.has(k)) removedVertexIndices.push(idx);
+      }
+      return { addedVertexIndices, removedVertexIndices };
+    } catch (e) {
+      return { addedVertexIndices: [], removedVertexIndices: [] };
+    }
   }
 
   // ===== 一括修復 =====
