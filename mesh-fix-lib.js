@@ -201,6 +201,111 @@ class MeshFixLib {
     return this._wasmModule.diagnose(V, T);
   }
 
+  // ===== Phase 5-3: 修復プロファイル =====
+  // ユースケースごとに事前定義されたオプションセットを返す。
+  // - fast:           軽量メッシュ用、クリティカルな修復のみ
+  // - standard:       通常用途、既定値（v1.0 動作互換）
+  // - detail:         細部を保持しつつ修復（テキスト刻印など細い形状向け）
+  // - strong:         強力修復、形状を多少崩しても確実に閉じる
+  // - slicer-compat:  Bambu / Orca で確実に読めるよう保守的設定
+  static REPAIR_PROFILES = Object.freeze({
+    fast: {
+      mergeVertexEpsilon: 0.001,
+      removeDegenerate: true,
+      fixWinding: false,
+      fillHoles: false,
+      removeIsolated: true
+    },
+    standard: {
+      mergeVertexEpsilon: 0.0005,
+      removeDegenerate: true,
+      fixWinding: true,
+      fillHoles: true,
+      removeIsolated: true
+    },
+    detail: {
+      mergeVertexEpsilon: 0.0001,  // 細かい点を統合しすぎない
+      removeDegenerate: true,
+      fixWinding: true,
+      fillHoles: true,
+      removeIsolated: false,        // 小さなパーツも保持
+      preserveSharpEdges: true
+    },
+    strong: {
+      mergeVertexEpsilon: 0.002,
+      removeDegenerate: true,
+      fixWinding: true,
+      fillHoles: true,
+      fillHolesAggressive: true,
+      removeIsolated: true,
+      voxelRemesh: true
+    },
+    'slicer-compat': {
+      mergeVertexEpsilon: 0.0005,
+      removeDegenerate: true,
+      fixWinding: true,
+      fillHoles: true,
+      removeIsolated: true,
+      ensureWatertight: true,
+      ensureManifold: true
+    }
+  });
+
+  // 名前指定でプロファイルを取得（不明なら standard）
+  static getRepairProfile(name) {
+    return MeshFixLib.REPAIR_PROFILES[name] || MeshFixLib.REPAIR_PROFILES.standard;
+  }
+
+  // ===== Phase 5-2: 修復前後レポート =====
+  // diagnose の結果を比較しやすい形に整える
+  buildRepairReport(beforeDiag, afterDiag, before, after, repairReport) {
+    const safe = (d, k, def) => (d && d[k] != null) ? d[k] : def;
+    return {
+      before: {
+        vertices: before ? before.V.length : 0,
+        triangles: before ? before.T.length : 0,
+        boundary: safe(beforeDiag, 'boundary', 0),
+        nonManifold: safe(beforeDiag, 'nonManifold', 0),
+        holes: safe(beforeDiag, 'holes', 0),
+        shells: safe(beforeDiag, 'shells', 1),
+        watertight: !!safe(beforeDiag, 'isWatertight', false),
+        manifold: !!safe(beforeDiag, 'isManifold', false)
+      },
+      after: {
+        vertices: after ? after.V.length : 0,
+        triangles: after ? after.T.length : 0,
+        boundary: safe(afterDiag, 'boundary', 0),
+        nonManifold: safe(afterDiag, 'nonManifold', 0),
+        holes: safe(afterDiag, 'holes', 0),
+        shells: safe(afterDiag, 'shells', 1),
+        watertight: !!safe(afterDiag, 'isWatertight', false),
+        manifold: !!safe(afterDiag, 'isManifold', false)
+      },
+      delta: {
+        vertices: (after ? after.V.length : 0) - (before ? before.V.length : 0),
+        triangles: (after ? after.T.length : 0) - (before ? before.T.length : 0),
+        merged: safe(repairReport, 'merged', 0),
+        nmFixed: safe(repairReport, 'nmFixed', 0),
+        holesFilled: safe(repairReport, 'holesFilled', 0)
+      },
+      summary: this._summarizeRepair(beforeDiag, afterDiag)
+    };
+  }
+
+  _summarizeRepair(before, after) {
+    const issues = [];
+    const fixes = [];
+    if (before && after) {
+      if (before.boundary > 0 && after.boundary === 0) fixes.push('境界エッジを閉じた');
+      if (before.nonManifold > 0 && after.nonManifold === 0) fixes.push('非多様体エッジを解消');
+      if (before.holes > 0 && after.holes === 0) fixes.push(`穴を ${before.holes} 個埋めた`);
+      if (after.boundary > 0) issues.push(`境界エッジ ${after.boundary} が残存`);
+      if (after.nonManifold > 0) issues.push(`非多様体 ${after.nonManifold} が残存`);
+      if (after.holes > 0) issues.push(`穴 ${after.holes} が残存`);
+    }
+    return { fixes, issues };
+  }
+
   // ===== 修復 (WASM) =====
 
   async repairObject(V, T, onProgress = null, userOptions = null) {
@@ -208,17 +313,34 @@ class MeshFixLib {
       throw new Error('WASM module not initialized. Call init() first.');
     }
 
-    const opts = userOptions || {};
+    // userOptions が文字列 (プロファイル名) なら展開
+    let opts;
+    if (typeof userOptions === 'string') {
+      opts = MeshFixLib.getRepairProfile(userOptions);
+    } else {
+      opts = userOptions || {};
+    }
     const progressFn = onProgress || undefined;
+
+    // Phase 5-2: 修復前 diagnose を取得（レポート用）
+    let beforeDiag = null;
+    try { beforeDiag = this._wasmModule.diagnose(V, T); } catch (e) { /* ignore */ }
 
     const result = this._wasmModule.repairObject(V, T, progressFn, opts);
 
     this._lastRepairData = { V: result.V, T: result.T };
 
+    // Phase 5-2: 修復後 diagnose も取得し、レポートを組み立てる
+    let afterDiag = null;
+    try { afterDiag = this._wasmModule.diagnose(result.V, result.T); } catch (e) { /* ignore */ }
+    const fullReport = this.buildRepairReport(beforeDiag, afterDiag, { V, T }, { V: result.V, T: result.T }, result.report);
+
     return {
       V: result.V,
       T: result.T,
-      report: result.report
+      report: result.report,
+      fullReport,
+      diagnose: { before: beforeDiag, after: afterDiag }
     };
   }
 
